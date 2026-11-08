@@ -1,0 +1,24 @@
+[package]
+name = "rnotepad-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-Rust data engine for RNotepad: bytes, encoding, EOL, line index, coordinates, search, formatting"
+
+[dependencies]
+memmap2.workspace = true
+encoding_rs.workspace = true
+memchr.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+unicode-width.workspace = true
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chardetng.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3.15.0"

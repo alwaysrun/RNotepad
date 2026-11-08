@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Rust / Cargo build outputs
+# ---------------------------------------------------------------------------
+/target/
+
+# ---------------------------------------------------------------------------
+# Rust temporary files and dependency lock file
+# Cargo.lock is intentionally left untracked; every build resolves versions.
+# ---------------------------------------------------------------------------
+Cargo.lock
+*.rs.bk
+*.orig
+.rustc_info.json
+
+# ---------------------------------------------------------------------------
+# Runtime data: the app writes logs to ./logs relative to the working directory
+# ---------------------------------------------------------------------------
+/logs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Vendored Scintilla build intermediates
+# Regenerate the distributable DLL with scripts/build-scintilla.ps1; the copied
+# binary itself (third_party/Scintilla.dll) is intentionally tracked as a
+# release asset, see docs/RNotepad-spec.md.
+# ---------------------------------------------------------------------------
+/vendor/scintilla-5.6.9/bin/
+/vendor/scintilla-5.6.9/win32/obj/
+/vendor/scintilla-5.6.9/win32/*.obj
+/vendor/scintilla-5.6.9/win32/*.res
+/vendor/scintilla-5.6.9/win32/*.dll
+/vendor/scintilla-5.6.9/win32/*.lib
+/vendor/scintilla-5.6.9/win32/*.exp
+/vendor/scintilla-5.6.9/win32/*.pdb
+
+# ---------------------------------------------------------------------------
+# Python helper scripts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+
+# ---------------------------------------------------------------------------
+# Editors and OS metadata
+# ---------------------------------------------------------------------------
+/.vscode/
+/.idea/
+*.suo
+*.swp
+Thumbs.db
+Desktop.ini

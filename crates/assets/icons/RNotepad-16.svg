@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t d">
+  <title id="t">RNotepad (16px)</title>
+  <desc id="d">Simplified 16-20px glyph: document, one text line, one highlighted line and one raw byte strip.</desc>
+  <defs><clipPath id="pageclip"><path d="M60 32 L192 32 L212 52 L212 208 Q212 224 196 224 L60 224 Q44 224 44 208 L44 48 Q44 32 60 32 Z"/></clipPath></defs>
+  <rect x="4" y="4" width="248" height="248" rx="48" fill="#1B3A61"/>
+  <rect x="5.5" y="5.5" width="245" height="245" rx="46.5" fill="none" stroke="#4E82BE" stroke-width="3"/>
+  <path d="M60 32 L192 32 L212 52 L212 208 Q212 224 196 224 L60 224 Q44 224 44 208 L44 48 Q44 32 60 32 Z" fill="#F7FAFE"/>
+  <path d="M192 32 L212 32 L212 52 Z" fill="#9EC2E5"/>
+  <line x1="72" y1="84" x2="184" y2="84" stroke="#2F5E9C" stroke-width="18" stroke-linecap="round"/>
+  <line x1="72" y1="130" x2="150" y2="130" stroke="#12B8A6" stroke-width="18" stroke-linecap="round"/>
+  <rect x="72" y="164" width="112" height="32" fill="#F2A23C"/>
+  <rect x="126" y="164" width="14" height="32" fill="#E4EDF6"/>
+</svg>

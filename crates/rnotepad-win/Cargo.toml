@@ -1,0 +1,16 @@
+[package]
+name = "rnotepad-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Win32 shell and custom views (Scintilla host, LargeView, HexView) for RNotepad"
+
+[dependencies]
+rnotepad-core.workspace = true
+winsafe.workspace = true
+windows.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+notify.workspace = true
+unicode-width.workspace = true

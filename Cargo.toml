@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = ["crates/rnotepad-core", "crates/rnotepad-win", "crates/rnotepad-app"]
+default-members = ["crates/rnotepad-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+rnotepad-core = { path = "crates/rnotepad-core" }
+rnotepad-win = { path = "crates/rnotepad-win" }
+winsafe = { version = "0.0.29", features = ["gui", "comctl", "user", "gdi", "dwm", "kernel"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
+] }
+memmap2 = "0.9.12"
+encoding_rs = "0.8.44"
+memchr = "2.8.3"
+regex = "1.13.1"
+serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_precision"] }
+serde = "1.0.228"
+unicode-width = "0.2.3"
+crossbeam-channel = "0.5.17"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.3"
+chardetng = "1.0.0"
+notify = "8.2.1"
+proptest = "1.12.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
