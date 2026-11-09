@@ -11,6 +11,7 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -57,8 +58,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW,
     GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENS,
     IDC_SIZEWE, IDNO,
-    IDYES, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-    MB_YESNOCANCEL, MENU_ITEM_FLAGS,
+    IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON2, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
+    MB_ICONWARNING, MB_OK,
+    MB_YESNOCANCEL, MB_YESNO, MENU_ITEM_FLAGS,
     MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MESSAGEBOX_STYLE, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SW_HIDE, SW_SHOW,
@@ -125,13 +127,28 @@ const FILE_BUFFER_LEN: usize = 4096;
 const FILE_FILTER: &str = "All files\0*.*\0Text files\0*.txt;*.log;*.json;*.csv;*.md\0\0";
 const OPEN_TITLE: &str = "Open file";
 const SAVE_TITLE: &str = "Save as";
+/// File name shown for a document that has never been saved.
+const UNTITLED_NAME: &str = "Untitled";
+/// Title suffix shown while the editor holds unsaved changes.
+const TITLE_LOCAL_CHANGES: &str = " [local changes]";
+/// Title suffix shown while the disk copy is newer than the loaded document.
+const TITLE_EXTERNAL_CHANGE: &str = " [changed on disk]";
+/// Title suffix shown when both sides hold different content.
+const TITLE_BOTH_CHANGES: &str = " [local changes, changed on disk]";
+/// Caption of prompts that resolve an external change.
+const EXTERNAL_CHANGE_CAPTION: &str = "File changed on disk";
+/// Caption of the prompt shown when the window closes.
+const EXIT_CAPTION: &str = "Exit RNotepad";
+/// Status hint after an external change; the user decides whether to reload.
+const EXTERNAL_CHANGE_HINT: &str =
+    "File changed on disk; use File > Reload to load the disk copy";
 /// Extension appended when a Save As name has none of its own.
 const SAVE_DEFAULT_EXTENSION: &str = "txt";
 const STATUS_FONT_FACE: &str = "Segoe UI";
 const STATUS_FONT_POINTS: i32 = 9;
 const POINTS_PER_INCH: i32 = 72;
 const MSG_WRITE_BLOCKED: &str = "This action needs an editable Text view";
-const STATUS_WIDTHS: [i32; STATUS_FIELD_COUNT] = [64, 190, 110, 84, 120, 96, 104, 0];
+const STATUS_WIDTHS: [i32; STATUS_FIELD_COUNT] = [64, 190, 110, 84, 120, 120, 104, 0];
 /// Characters contributed per byte by the hex copy format (`AA `).
 const HEX_COPY_BYTES_PER_ITEM: usize = 3;
 /// Posted by the floating results frame when its client area changed.
@@ -243,6 +260,41 @@ enum SaveOutcome {
     Failed,
 }
 
+/// Disk snapshot used to tell a new external revision apart from repeated
+/// notifications for the revision already reported to the user.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiskState {
+    /// The file exists and its size and modification time were read.
+    Readable { size: u64, mtime: Option<SystemTime> },
+    /// The file is missing or unreadable; any notification is significant.
+    Unreadable,
+}
+
+/// How the editor buffer and the file on disk differ from each other.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChangeState {
+    /// Both sides match the revision that was loaded.
+    Clean,
+    /// Only the editor buffer holds unsaved changes.
+    Local,
+    /// Only the disk file is newer than the loaded revision.
+    External,
+    /// Both sides hold changes relative to the loaded revision.
+    Both,
+}
+
+impl ChangeState {
+    /// Title suffix that names the state, so all three cases stay distinct.
+    fn title_marker(self) -> &'static str {
+        match self {
+            Self::Clean => "",
+            Self::Local => TITLE_LOCAL_CHANGES,
+            Self::External => TITLE_EXTERNAL_CHANGE,
+            Self::Both => TITLE_BOTH_CHANGES,
+        }
+    }
+}
+
 struct FindBar {
     edit: HWND,
     replace: HWND,
@@ -291,6 +343,14 @@ struct App {
     find: Option<FindBar>,
     job: Option<SearchJob>,
     watcher: Option<ChangeWatcher>,
+    /// `true` while the file on disk holds a revision newer than the loaded
+    /// document that has not been reconciled yet.
+    external_change: bool,
+    /// Disk revision already reported for the pending external change, so a
+    /// burst of notifications does not reopen the prompt.
+    reported_disk_state: Option<DiskState>,
+    /// Change state last reflected in the title bar.
+    change_state: ChangeState,
     /// Recently opened files shown in the File menu.
     recent: RecentFiles,
     /// Guards against text/hex link feedback loops.
@@ -335,6 +395,9 @@ impl Default for App {
             find: None,
             job: None,
             watcher: None,
+            external_change: false,
+            reported_disk_state: None,
+            change_state: ChangeState::Clean,
             recent: RecentFiles::default(),
             syncing: false,
             last_text_selection: None,
@@ -1302,19 +1365,35 @@ impl App {
     }
 
     fn refresh_title(&self) {
-        let name = self
-            .session
-            .read(|doc| doc.path.clone())
-            .flatten()
-            .and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "Untitled".to_owned());
-        let title = format!("{name} - RNotepad");
+        let name = self.document_name();
+        let marker = self.change_state().title_marker();
+        let title = format!("{name}{marker} - RNotepad");
         unsafe {
             let _ = SetWindowTextW(self.hwnd, PCWSTR(to_wide(&title).as_ptr()));
         }
+    }
+
+    /// Compares the editor buffer with the disk file.
+    fn change_state(&self) -> ChangeState {
+        match (self.is_dirty(), self.external_change) {
+            (false, false) => ChangeState::Clean,
+            (true, false) => ChangeState::Local,
+            (false, true) => ChangeState::External,
+            (true, true) => ChangeState::Both,
+        }
+    }
+
+    /// File name shown in the title bar and prompts.
+    fn document_name(&self) -> String {
+        self.session
+            .read(|doc| {
+                doc.path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .flatten()
+            .unwrap_or_else(|| UNTITLED_NAME.to_owned())
     }
 
     fn new_document(&mut self) {
@@ -1323,6 +1402,7 @@ impl App {
         }
         self.cancel_search();
         self.watcher = None;
+        self.reset_external_change();
         self.hex = None;
         self.follow_tail = false;
         self.reset_results_table();
@@ -1352,6 +1432,7 @@ impl App {
             Ok(shared) => {
                 self.hex = None;
                 self.follow_tail = false;
+                self.reset_external_change();
                 self.reset_results_table();
                 self.watcher = match ChangeWatcher::new(&path) {
                     Ok(watcher) => Some(watcher),
@@ -1455,6 +1536,7 @@ impl App {
         }
         self.cancel_search();
         self.watcher = None;
+        self.reset_external_change();
         self.text = None;
         self.text_data = None;
         self.hex = None;
@@ -1481,6 +1563,19 @@ impl App {
     }
 
     fn save(&mut self, target: Option<PathBuf>) -> SaveOutcome {
+        self.save_with(target, false)
+    }
+
+    /// Saves the buffer.
+    ///
+    /// A disk copy that changed after the document was loaded is never
+    /// replaced silently: the user is asked first, so keeping local edits is
+    /// always an explicit decision.
+    fn save_with(
+        &mut self,
+        target: Option<PathBuf>,
+        allow_external_overwrite: bool,
+    ) -> SaveOutcome {
         self.cancel_search();
         let text = match &self.text {
             Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
@@ -1505,19 +1600,34 @@ impl App {
             self.update_status();
             return SaveOutcome::Failed;
         };
-        let request = SaveRequest {
-            text: &text,
-            target: Some(&path),
-            backup: false,
-            allow_external_overwrite: false,
-        };
-        let result = {
-            let mut guard = shared
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            save_document(&mut guard, &request).map(|()| {
-                guard.write_policy.eol.resolve(guard.eol.dominant)
-            })
+        let mut allowed = allow_external_overwrite;
+        let result = loop {
+            let request = SaveRequest {
+                text: &text,
+                target: Some(&path),
+                backup: false,
+                allow_external_overwrite: allowed,
+            };
+            let outcome = {
+                let mut guard = shared
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                save_document(&mut guard, &request).map(|()| {
+                    guard.write_policy.eol.resolve(guard.eol.dominant)
+                })
+            };
+            match outcome {
+                Err(SaveError::ExternalModified) if !allowed => {
+                    if !self.confirm_external_overwrite() {
+                        self.status_message =
+                            "Save cancelled: the file changed on disk".to_owned();
+                        self.update_status();
+                        return SaveOutcome::Cancelled;
+                    }
+                    allowed = true;
+                }
+                other => break other,
+            }
         };
         match result {
             Ok(eol) => {
@@ -1537,6 +1647,8 @@ impl App {
                     };
                 }
                 self.record_recent(&path);
+                // The file on disk now matches the editor again.
+                self.clear_external_change();
                 self.status_message = format!("Saved {}", path.display());
                 self.refresh_title();
                 self.update_status();
@@ -2761,6 +2873,10 @@ impl App {
         self.update_status();
     }
 
+    /// Reports external file changes without touching the document.
+    ///
+    /// Reloading is always an explicit user decision (`File > Reload`), so the
+    /// timer only maintains the change indicator and a status hint.
     fn poll_watcher(&mut self) {
         let changed = match &self.watcher {
             Some(watcher) => watcher.take_change(),
@@ -2770,22 +2886,60 @@ impl App {
             return;
         }
         // A burst of notifications for a file that already matches the loaded
-        // revision must not rebuild the view on every timer tick.
+        // revision must not rebuild the indicator on every timer tick.
         if !self.file_changed_on_disk() {
+            self.clear_external_change();
             return;
         }
-        let dirty = self.is_dirty();
-        if dirty {
-            self.status_message =
-                "The file changed on disk; use File > Reload to refresh".to_owned();
-            self.update_status();
+        let Some(state) = self.disk_state() else {
+            return;
+        };
+        // One external save may deliver several notifications; only a new
+        // revision updates the indicator and the hint.
+        if self.external_change && self.reported_disk_state == Some(state) {
             return;
         }
-        match self.reload_document() {
-            Ok(()) => self.status_message = "Reloaded after an external change".to_owned(),
-            Err(err) => self.status_message = format!("Reload failed: {err}"),
-        }
+        self.mark_external_change(state);
+        self.status_message = EXTERNAL_CHANGE_HINT.to_owned();
         self.update_status();
+    }
+
+    /// Records that the disk copy is newer and shows the title indicator.
+    fn mark_external_change(&mut self, state: DiskState) {
+        self.reported_disk_state = Some(state);
+        if !self.external_change {
+            self.external_change = true;
+            self.refresh_title();
+        }
+    }
+
+    /// Drops the pending indicator and every recorded disk snapshot.
+    fn clear_external_change(&mut self) {
+        if !self.external_change && self.reported_disk_state.is_none() {
+            return;
+        }
+        self.reset_external_change();
+        self.refresh_title();
+    }
+
+    /// Clears the pending indicator without touching the window title, for
+    /// callers that replace the whole document and refresh the title anyway.
+    fn reset_external_change(&mut self) {
+        self.external_change = false;
+        self.reported_disk_state = None;
+    }
+
+    /// Current size and modification time of the backing file.
+    fn disk_state(&self) -> Option<DiskState> {
+        let path = self.session.read(|doc| doc.path.clone()).flatten()?;
+        Some(match std::fs::metadata(&path) {
+            Ok(metadata) => DiskState::Readable {
+                size: metadata.len(),
+                mtime: metadata.modified().ok(),
+            },
+            // A missing or unreadable file should reach the reload error path.
+            Err(_) => DiskState::Unreadable,
+        })
     }
 
     /// Explicit File > Reload command.
@@ -2806,7 +2960,10 @@ impl App {
             return;
         }
         match self.reload_document() {
-            Ok(()) => self.status_message = "Reloaded from disk".to_owned(),
+            Ok(()) => {
+                self.clear_external_change();
+                self.status_message = "Reloaded from disk".to_owned();
+            }
             Err(err) => self.status_message = format!("Reload failed: {err}"),
         }
         self.update_status();
@@ -2912,16 +3069,7 @@ impl App {
         if !self.session.has_document() || !self.is_dirty() {
             return true;
         }
-        let name = self
-            .session
-            .read(|doc| {
-                doc.path
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .flatten()
-            .unwrap_or_else(|| "Untitled".to_owned());
+        let name = self.document_name();
         let message = format!("Save changes to {name}?");
         let answer = unsafe {
             MessageBoxW(
@@ -2937,6 +3085,112 @@ impl App {
             // Cancel keeps the document untouched and aborts the transition.
             _ => false,
         }
+    }
+
+    /// Confirms leaving the application.
+    ///
+    /// Besides unsaved edits, a newer disk revision must be surfaced as well:
+    /// exiting must never hide that the file on disk no longer matches the
+    /// revision the editor loaded.  Read-only documents skip the external
+    /// check because they hold no local state and change continuously when
+    /// they are live logs.
+    fn confirm_exit(&mut self) -> bool {
+        if !self.session.has_document() {
+            return true;
+        }
+        let dirty = self.is_dirty();
+        let external = self.external_change_pending();
+        // A watcher notification may still be queued when the window closes,
+        // so the title indicator is refreshed from the metadata comparison
+        // before the user decides.
+        if external && !self.external_change {
+            if let Some(state) = self.disk_state() {
+                self.mark_external_change(state);
+            }
+            self.status_message = EXTERNAL_CHANGE_HINT.to_owned();
+            self.update_status();
+        }
+        match (dirty, external) {
+            (false, false) => true,
+            (true, false) => self.confirm_transition(),
+            (false, true) => self.confirm_exit_external_only(),
+            (true, true) => self.confirm_exit_both(),
+        }
+    }
+
+    /// `true` when the editable document has a newer revision on disk.
+    fn external_change_pending(&self) -> bool {
+        let editable = self
+            .session
+            .read(|doc| doc.kind.is_editable() && doc.path.is_some())
+            .unwrap_or(false);
+        editable && (self.external_change || self.file_changed_on_disk())
+    }
+
+    /// Exit prompt when only the disk copy changed: nothing is lost, but the
+    /// user must know that the editor no longer shows the newest revision.
+    fn confirm_exit_external_only(&self) -> bool {
+        let name = self.document_name();
+        let message = format!(
+            "{name} has changed on disk since it was opened.\n\n\
+             There are no unsaved edits.\n\n\
+             Yes: exit now (the disk file is kept as it is)\n\
+             No: stay open (use File > Reload to load the disk copy)"
+        );
+        let answer = unsafe {
+            MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(to_wide(&message).as_ptr()),
+                PCWSTR(to_wide(EXIT_CAPTION).as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        };
+        answer == IDYES
+    }
+
+    /// Exit prompt when both sides changed, so saving cannot overwrite the
+    /// disk copy without the user knowing.
+    fn confirm_exit_both(&mut self) -> bool {
+        let name = self.document_name();
+        let message = format!(
+            "{name} has unsaved edits and has also changed on disk since it was opened.\n\n\
+             Yes: save the editor contents and exit (overwrites the disk copy)\n\
+             No: exit and discard the unsaved edits (the disk copy is kept)\n\
+             Cancel: stay open (use File > Reload to load the disk copy)"
+        );
+        let answer = unsafe {
+            MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(to_wide(&message).as_ptr()),
+                PCWSTR(to_wide(EXIT_CAPTION).as_ptr()),
+                MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON3,
+            )
+        };
+        match answer {
+            // The prompt names the overwrite explicitly, so the save may pass
+            // the external-change guard it would otherwise trip again.
+            IDYES => matches!(self.save_with(None, true), SaveOutcome::Saved),
+            IDNO => true,
+            _ => false,
+        }
+    }
+
+    /// Asks whether the editor contents may replace a newer disk copy.
+    fn confirm_external_overwrite(&self) -> bool {
+        let name = self.document_name();
+        let message = format!(
+            "{name} has changed on disk since it was opened.\n\n\
+             Overwrite the disk file with the editor contents?"
+        );
+        let answer = unsafe {
+            MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(to_wide(&message).as_ptr()),
+                PCWSTR(to_wide(EXTERNAL_CHANGE_CAPTION).as_ptr()),
+                MB_YESNO | MB_ICONWARNING,
+            )
+        };
+        answer == IDYES
     }
 
     fn caret_state(&self) -> (Option<(u32, u32)>, Option<u64>, Option<u64>) {
@@ -3022,6 +3276,7 @@ impl App {
             selection_bytes: selection,
             offset,
             progress,
+            external_change: self.external_change,
         };
         let mut fields = statusbar::fields(&info);
         let results = &self.session.results;
@@ -3147,6 +3402,13 @@ impl App {
     }
 
     fn update_status(&mut self) {
+        // Local edits start and stop without a document transition, so the
+        // title marker must follow the change state on every refresh.
+        let state = self.change_state();
+        if state != self.change_state {
+            self.change_state = state;
+            self.refresh_title();
+        }
         let fields = self.compute_status_fields();
         if self.status.is_some() {
             for (index, text) in fields.iter().enumerate() {
@@ -4212,7 +4474,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_CLOSE => {
-            let proceed = with_app_result(hwnd, |app| app.confirm_transition());
+            let proceed = with_app_result(hwnd, |app| app.confirm_exit());
             if matches!(proceed, Some(true)) {
                 unsafe {
                     let _ = DestroyWindow(hwnd);

@@ -31,6 +31,10 @@ const FLAG_EDITING: &str = "EDIT";
 const FLAG_DIRTY: &str = "*";
 const FLAG_BINARY: &str = "BINARY";
 const FLAG_LARGE: &str = "LARGE";
+/// `true` when the disk copy differs from the loaded revision.
+const FLAG_DISK: &str = "DISK";
+/// Separator between independent status flags.
+const FLAG_SEPARATOR: &str = " · ";
 const FLAG_STALE_HEX: &str = "磁盘版本（有未保存修改）";
 const MIXED_PREFIX: &str = "Mixed";
 const CONFIDENCE_THRESHOLD: f32 = 0.90;
@@ -55,6 +59,8 @@ pub struct StatusInfo<'a> {
     pub offset: Option<u64>,
     /// Background task progress text.
     pub progress: Option<String>,
+    /// `true` when the file on disk differs from the loaded revision.
+    pub external_change: bool,
 }
 
 /// Formats every status field.
@@ -117,30 +123,35 @@ fn position_field(info: &StatusInfo<'_>) -> String {
 }
 
 fn flags_field(info: &StatusInfo<'_>) -> String {
-    if !info.doc.kind.is_editable() {
+    let mut flags = if !info.doc.kind.is_editable() {
         // The reason is spelled out so a read-only document is unmistakable.
         let reason = if info.doc.text_available {
             FLAG_LARGE
         } else {
             FLAG_BINARY
         };
-        return format!("{FLAG_READ_ONLY} · {reason}");
-    }
-    let mut flags = String::new();
-    if info.editing {
-        flags.push_str(FLAG_EDITING);
+        format!("{FLAG_READ_ONLY}{FLAG_SEPARATOR}{reason}")
+    } else if info.editing {
+        let mut text = FLAG_EDITING.to_owned();
         if info.dirty {
-            flags.push(' ');
-            flags.push_str(FLAG_DIRTY);
+            text.push(' ');
+            text.push_str(FLAG_DIRTY);
         }
+        text
     } else {
-        flags.push_str(FLAG_READ_ONLY);
-    }
+        FLAG_READ_ONLY.to_owned()
+    };
     if info.editing && info.dirty && info.view == ViewMode::Hex {
         if !flags.is_empty() {
-            flags.push_str(" · ");
+            flags.push_str(FLAG_SEPARATOR);
         }
         flags.push_str(FLAG_STALE_HEX);
+    }
+    if info.external_change {
+        if !flags.is_empty() {
+            flags.push_str(FLAG_SEPARATOR);
+        }
+        flags.push_str(FLAG_DISK);
     }
     flags
 }
@@ -200,6 +211,7 @@ mod tests {
             selection_bytes: None,
             offset: None,
             progress: None,
+            external_change: false,
         };
         let fields = fields(&info);
         assert_eq!(fields.len(), FIELD_COUNT);
