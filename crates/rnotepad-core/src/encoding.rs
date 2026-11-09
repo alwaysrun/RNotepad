@@ -143,6 +143,12 @@ impl BomState {
         self.bytes().len() as u64
     }
 
+    /// `true` when no BOM is written for this state.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.bytes().is_empty()
+    }
+
     /// The character set implied by the BOM, if any.
     #[must_use]
     pub const fn charset(self) -> Option<Charset> {
@@ -479,7 +485,7 @@ fn decode_windows1252(raw: &[u8], bom_len: u64, latin1: bool) -> DecodedText {
     let mut errors = Vec::new();
     for (i, b) in raw.iter().enumerate() {
         let byte = *b;
-        if latin1 || byte < 0x80 || byte >= 0xA0 {
+        if latin1 || !(0x80..0xA0).contains(&byte) {
             // Latin-1 maps every byte; Windows-1252 maps 0xA0..=0xFF identically.
             text.push(char::from(byte));
         } else {
@@ -617,12 +623,11 @@ fn is_big5_trail(b: u8) -> bool {
 
 fn shift_jis_unit_len(raw: &[u8], pos: usize) -> usize {
     let b = raw[pos];
-    if (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b) {
-        if pos + 1 < raw.len()
-            && ((0x40..=0x7E).contains(&raw[pos + 1]) || (0x80..=0xFC).contains(&raw[pos + 1]))
-        {
-            return 2;
-        }
+    if ((0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b))
+        && pos + 1 < raw.len()
+        && ((0x40..=0x7E).contains(&raw[pos + 1]) || (0x80..=0xFC).contains(&raw[pos + 1]))
+    {
+        return 2;
     }
     1
 }

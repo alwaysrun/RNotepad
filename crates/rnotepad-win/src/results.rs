@@ -12,8 +12,6 @@ use rnotepad_core::search::MatchHit;
 pub struct ResultRow {
     pub line: u32,
     pub column: u32,
-    pub offset: u64,
-    pub length: u32,
 }
 
 /// Hits for the current search.
@@ -110,16 +108,7 @@ impl ResultsModel {
         self.hits.get(index).map(|hit| ResultRow {
             line: hit.line_no.saturating_add(1),
             column: hit.col.saturating_add(1),
-            offset: hit.raw_offset,
-            length: hit.match_len,
         })
-    }
-
-    /// Returns the list view text for `index`.
-    #[must_use]
-    pub fn row_text(&self, index: usize) -> Option<String> {
-        self.row(index)
-            .map(|row| format!("Ln {}, Col {} · 0x{:08X}", row.line, row.column, row.offset))
     }
 
     /// All hits.
@@ -151,7 +140,6 @@ mod tests {
         let row = model.row(0).unwrap();
         assert_eq!(row.line, 1);
         assert_eq!(row.column, 1);
-        assert!(model.row_text(0).unwrap().contains("0x00000010"));
     }
 
     #[test]

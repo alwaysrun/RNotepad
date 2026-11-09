@@ -18,9 +18,9 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC,
-    GetStockObject, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_SWISS, FW_NORMAL,
-    HBRUSH, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC,
-    VARIABLE_PITCH, WHITE_BRUSH,
+    GetStockObject, ScreenToClient, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
+    FF_SWISS, FW_NORMAL, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    ReleaseDC, VARIABLE_PITCH, WHITE_BRUSH,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -30,17 +30,25 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
-    OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
+    OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, BST_CHECKED, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX,
-    LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETITEMCOUNT,
-    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_OWNERDATA, LVS_REPORT, LVS_SINGLESEL, NM_DBLCLK,
-    NM_RCLICK, NMLISTVIEW, NMLVDISPINFOW, NMMOUSE, NMHDR, SB_SETPARTS, SB_SETTEXTW,
-    SB_SETTIPTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW, WC_LISTVIEWW,
+    InitCommonControlsEx, BST_CHECKED, EM_SETSEL, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
+    ICC_WIN95_CLASSES,
+    INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO, LVM_HITTEST,
+    LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT,
+    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SINGLESEL, NMLISTVIEW, NMLVDISPINFOW, NM_RCLICK, NMHDR, SB_SETPARTS,
+    SB_SETTEXTW, STATUSCLASSNAMEW, TOOLTIPS_CLASSW, TTDT_AUTOPOP, TTF_ABSOLUTE, TTF_IDISHWND,
+    TTF_TRACK, TTTOOLINFOW, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOANIMATE, TTS_NOFADE, TTS_NOPREFIX,
+    WC_LISTVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_F3, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_ESCAPE, VK_F3, VK_RETURN,
+};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
 };
@@ -48,24 +56,31 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CheckMenuItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, EnableMenuItem, ES_AUTOHSCROLL, FCONTROL, FVIRTKEY, GetClientRect,
-    GetCursorPos, GetMenu, GetMessageW, GetParent, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, IDC_ARROW, IDYES, KillTimer,
-    LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_YESNO, MENU_ITEM_FLAGS,
-    MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_DISABLED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    DispatchMessageW, DrawMenuBar, EnableMenuItem, ES_AUTOHSCROLL, FCONTROL, FVIRTKEY, GetClientRect,
+    GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW,
+    GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENS,
+    IDC_SIZEWE, IDNO,
+    IDYES, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+    MB_YESNOCANCEL, MENU_ITEM_FLAGS,
+    MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MESSAGEBOX_STYLE, MoveWindow, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterClassW, SW_HIDE, SW_SHOW, SendMessageW, SetParent, SetTimer,
-    SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx, TranslateAcceleratorW,
-    TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_COPY,
-    WM_CUT, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_PASTE, WM_SIZE, WM_TIMER, WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_CLIENTEDGE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_THICKFRAME, WS_VISIBLE, WM_SETFONT, ACCEL, ACCEL_VIRT_FLAGS,
+    PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SW_HIDE, SW_SHOW,
+    SendMessageW, SetCursor,
+    SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
+    TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SIZE, WM_TIMER,
+    WM_VSCROLL, WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WM_SETFONT, ACCEL,
+    ACCEL_VIRT_FLAGS,
 };
 
 use rnotepad_core::bytes::ByteSource;
 use rnotepad_core::coord::{CoordMap, RawByteOffset, Utf8Pos};
-use rnotepad_core::document::ViewMode;
+use rnotepad_core::document::{Document, DocumentKind, ViewMode};
 use rnotepad_core::eol::{EolKind, EolWritePolicy};
 use rnotepad_core::encoding::{decode, precheck_unmappable, BomPolicy, Charset};
 use rnotepad_core::format::{Diagnostic, FormatOptions, FormatProvider, JsonFormatProvider};
@@ -76,7 +91,9 @@ use rnotepad_win::icon::WindowIcons;
 use rnotepad_win::notify::ChangeWatcher;
 use rnotepad_win::results::ResultsModel;
 use rnotepad_win::save::{save_document, SaveRequest, SaveError};
-use rnotepad_win::sci::{Scintilla, SCN_UPDATEUI_CODE};
+use rnotepad_win::sci::{
+    is_newline_char_added, Scintilla, SCN_CHARADDED_CODE, SCN_UPDATEUI_CODE, SCN_ZOOM_CODE,
+};
 use rnotepad_win::statusbar::{self, StatusInfo};
 use rnotepad_win::view::{
     SharedDoc, SharedViewData, ViewData, ViewKind, ViewWindow, VIEW_TAG_HEX, VIEW_TAG_TEXT,
@@ -84,6 +101,7 @@ use rnotepad_win::view::{
 };
 
 use crate::commands::*;
+use crate::recent::{RecentFiles, RECENT_LIMIT};
 use crate::session::{Session, ViewLayout};
 use crate::tasks::SearchJob;
 
@@ -92,6 +110,13 @@ const WINDOW_WIDTH: i32 = 1100;
 const WINDOW_HEIGHT: i32 = 760;
 const BODY_BACKGROUND: COLORREF = rgb(255, 255, 255);
 const FIND_BAR_BACKGROUND: COLORREF = rgb(246, 246, 246);
+/// Colour of the draggable divider between the text and hex panes.
+const SPLITTER_COLOR: COLORREF = rgb(206, 206, 206);
+/// Ratios the divider drag may not cross, so both panes stay usable.
+const MIN_SPLIT_RATIO: f32 = 0.10;
+const MAX_SPLIT_RATIO: f32 = 0.90;
+/// Extra pixels on each side of the divider that also start a drag.
+const SPLITTER_HIT_SLOP: i32 = 3;
 const MARGIN_CELLS: i32 = 5;
 const CHAR_WIDTH_96DPI: i32 = 8;
 const MONO_POINTS: i32 = DEFAULT_FONT_POINTS;
@@ -104,32 +129,59 @@ const FILE_BUFFER_LEN: usize = 4096;
 const FILE_FILTER: &str = "All files\0*.*\0Text files\0*.txt;*.log;*.json;*.csv;*.md\0\0";
 const OPEN_TITLE: &str = "Open file";
 const SAVE_TITLE: &str = "Save as";
+/// Extension appended when a Save As name has none of its own.
+const SAVE_DEFAULT_EXTENSION: &str = "txt";
 const STATUS_FONT_FACE: &str = "Segoe UI";
 const STATUS_FONT_POINTS: i32 = 9;
 const POINTS_PER_INCH: i32 = 72;
-const ENCODING_TIP: &str = "Double-click to change the encoding";
-const EOL_TIP: &str = "Double-click to change the line endings";
-const MENU_HEADER_ENCODING: &str = "Detected";
-const MENU_HEADER_EOL: &str = "Line endings";
-const MENU_REINTERPRET: &str = "Reinterpret (bytes unchanged)";
-const MENU_CONVERT: &str = "Convert to (changes bytes on save)";
-const MENU_BOM: &str = "BOM";
-const MENU_KEEP_AS_IS: &str = "Keep as is (Preserve)";
-const MENU_CONVERT_WINDOWS: &str = "Convert to Windows (CRLF)";
-const MENU_CONVERT_UNIX: &str = "Convert to Unix (LF)";
-const MENU_CONVERT_MAC: &str = "Convert to Classic Mac (CR)";
 const MSG_WRITE_BLOCKED: &str = "This action needs an editable Text view";
 const STATUS_WIDTHS: [i32; STATUS_FIELD_COUNT] = [64, 190, 110, 84, 120, 96, 104, 0];
-/// Scale factor turning a `0.0..=1.0` confidence into a percentage.
-const PERCENT_SCALE: f32 = 100.0;
 /// Characters contributed per byte by the hex copy format (`AA `).
 const HEX_COPY_BYTES_PER_ITEM: usize = 3;
 /// Posted by the floating results frame when its client area changed.
 const WM_APP_FLOAT_RESIZE: u32 = 0x8000 + 3;
+/// Posted when a results display request was dropped during a re-entrant paint.
+const WM_APP_RESULTS_REPAINT: u32 = 0x8000 + 4;
+/// Subclass identifiers of the two find-bar edit controls.
+const SUBCLASS_FIND_EDIT: usize = 1;
+const SUBCLASS_REPLACE_EDIT: usize = 2;
+/// Subclass identifier of the results list, which drives the hover tip.
+const SUBCLASS_RESULTS_LIST: usize = 3;
+/// Reference DPI at which pixel constants below are expressed.
+const BASE_DPI: i32 = 96;
+/// Maximum width of a hover tip before long messages wrap, in 96-DPI pixels.
+const RESULTS_TIP_MAX_WIDTH: i32 = 640;
+/// Offset of the hover tip from the pointer, in 96-DPI pixels.
+const RESULTS_TIP_OFFSET: i32 = 16;
+/// How long a hovered tip stays visible while the pointer is still.
+const RESULTS_TIP_DURATION_MS: isize = 60_000;
+/// Dwell time before a hover tip appears, so sweeping over rows stays quiet.
+const RESULTS_TIP_DELAY_MS: u32 = 400;
+
 /// Column headers and widths of the search-hit table.
-const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Offset", 100)];
+const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Text", 400)];
+/// Characters shown in the hit preview before ellipses are added.
+const RESULT_PREVIEW_CHARS: usize = 100;
+/// Characters of context kept before the match inside a hit preview.
+const RESULT_PREVIEW_LEAD_CHARS: usize = 20;
+/// Raw bytes read before a match when the line is longer than the preview.
+const RESULT_PREVIEW_PREFIX_BYTES: u64 = 512;
+/// Raw bytes read from a match onwards when the line is longer than the preview.
+const RESULT_PREVIEW_SUFFIX_BYTES: u64 = 1024;
+/// Marker placed where a hit preview omits text.
+const RESULT_PREVIEW_ELLIPSIS: char = '…';
 /// Column headers and widths of the JSON problem table.
 const PROBLEM_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Message", 300)];
+/// Extended styles of the results list.
+///
+/// Full-row selection makes a click select the whole hit, and double buffering
+/// keeps owner-data repaints from flashing while the hover tip appears.
+const LIST_VIEW_EX_STYLE: u32 = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
+/// Smallest width the preview column may shrink to, in 96-DPI pixels.
+const RESULTS_PREVIEW_MIN_WIDTH: i32 = 120;
+/// Space reserved right of the preview column so the vertical scrollbar never
+/// covers its text, in 96-DPI pixels.
+const RESULTS_PREVIEW_GUTTER: i32 = 4;
 /// Window class of the floating results frame.
 const FLOAT_CLASS_NAME: &str = "RNotepadFloatFrame";
 /// Caption of the floating results frame.
@@ -161,11 +213,22 @@ const CONVERT_MENU_ITEMS: [(u32, &str); 9] = [
     (ID_CONVERT_WINDOWS_1252, "Windows-1252"),
     (ID_CONVERT_LATIN1, "Latin-1"),
 ];
-const ACCELERATORS: [ACCEL; 5] = [
+/// EOL commands and their menu labels; the current kind is checked.
+const EOL_MENU_ITEMS: [(u32, EolKind, &str); 3] = [
+    (ID_EOL_CRLF, EolKind::CrLf, "CRLF"),
+    (ID_EOL_LF, EolKind::Lf, "LF"),
+    (ID_EOL_CR, EolKind::Cr, "CR"),
+];
+const ACCELERATORS: [ACCEL; 8] = [
     control_accel(b'O', ID_FILE_OPEN),
     control_accel(b'S', ID_FILE_SAVE),
+    control_accel(b'R', ID_FILE_RELOAD),
     control_accel(b'F', ID_EDIT_FIND),
+    control_accel(b'H', ID_EDIT_REPLACE),
     control_accel(b'N', ID_FILE_NEW),
+    // Copy is a window-level accelerator so it works no matter which child
+    // currently owns focus; the handler then dispatches by focus.
+    control_accel(b'C', ID_EDIT_COPY),
     ACCEL {
         fVirt: ACCEL_VIRT_FLAGS(FVIRTKEY.0),
         key: VK_F3.0,
@@ -187,11 +250,21 @@ enum TextHandle {
     Large(ViewWindow),
 }
 
+/// Result of an explicit save attempt, used to decide whether a document
+/// transition may continue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    Saved,
+    Cancelled,
+    Failed,
+}
+
 struct FindBar {
     edit: HWND,
     replace: HWND,
     next: HWND,
     all: HWND,
+    replace_one: HWND,
     replace_all: HWND,
     case: HWND,
     close: HWND,
@@ -206,6 +279,15 @@ enum ResultsMode {
     Problems,
 }
 
+/// Axis along which a draggable divider separates two panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitAxis {
+    /// Panes sit side by side; the divider moves horizontally.
+    Columns,
+    /// Panes sit one above the other; the divider moves vertically.
+    Rows,
+}
+
 struct App {
     hwnd: HWND,
     session: Session,
@@ -214,6 +296,17 @@ struct App {
     text_data: Option<SharedViewData>,
     hex: Option<ViewWindow>,
     results_list: Option<HWND>,
+    /// Tracked tooltip that reveals a truncated problem message on hover.
+    results_tip: Option<HWND>,
+    /// UTF-16 buffer owned by [`App`] because a tracked tooltip keeps the
+    /// text pointer instead of copying it.
+    tip_text: Vec<u16>,
+    /// Row index the tip currently describes, if one is visible.
+    tip_row: Option<usize>,
+    /// Row waiting for the dwell timer before its tip is shown.
+    tip_pending_row: Option<usize>,
+    /// True once mouse-leave tracking is armed for the results list.
+    tip_tracking: bool,
     /// Set while the results list is reparented into a floating frame.
     float_frame: Option<HWND>,
     results_mode: ResultsMode,
@@ -225,10 +318,24 @@ struct App {
     find: Option<FindBar>,
     job: Option<SearchJob>,
     watcher: Option<ChangeWatcher>,
+    /// Recently opened files shown in the File menu.
+    recent: RecentFiles,
     /// Guards against text/hex link feedback loops.
     syncing: bool,
+    /// Last text selection applied to the hex view, so Scintilla's deferred
+    /// `SCN_UPDATEUI` notifications for pure scrolling do not clobber it.
+    last_text_selection: Option<(usize, usize)>,
     /// Keeps a large document scrolled to its last line.
     follow_tail: bool,
+    /// Ratio of the text pane in the text + hex split; dragged by the divider.
+    split_ratio: f32,
+    /// Ratio of the text pane above the docked results panel.
+    results_split_ratio: f32,
+    /// Width last applied to the preview column, so layout passes triggered by
+    /// unrelated geometry do not rewrite it and repaint the header.
+    results_preview_width: i32,
+    /// Axis of the divider being dragged, if any.
+    split_axis: Option<SplitAxis>,
     status_message: String,
     editing: bool,
     fields_snapshot: [String; STATUS_FIELD_COUNT],
@@ -246,6 +353,11 @@ impl Default for App {
             text_data: None,
             hex: None,
             results_list: None,
+            results_tip: None,
+            tip_text: Vec::new(),
+            tip_row: None,
+            tip_pending_row: None,
+            tip_tracking: false,
             float_frame: None,
             results_mode: ResultsMode::Hits,
             problems: Vec::new(),
@@ -255,8 +367,14 @@ impl Default for App {
             find: None,
             job: None,
             watcher: None,
+            recent: RecentFiles::default(),
             syncing: false,
+            last_text_selection: None,
             follow_tail: false,
+            split_ratio: TEXT_SPLIT_RATIO,
+            results_split_ratio: TEXT_SPLIT_RATIO,
+            results_preview_width: 0,
+            split_axis: None,
             status_message: String::new(),
             editing: false,
             fields_snapshot: std::array::from_fn(|_| String::new()),
@@ -268,6 +386,7 @@ impl Default for App {
 
 thread_local! {
     static IN_APP: Cell<bool> = const { Cell::new(false) };
+    static REPAINT_POSTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Runs one message with exclusive access to [`App`].
@@ -300,7 +419,7 @@ fn with_app(hwnd: HWND, visit: impl FnOnce(&mut App)) {
 impl App {
     fn initialise(&mut self) {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
-        match MonoFont::new(dpi) {
+        match MonoFont::new(dpi, MONO_POINTS) {
             Ok(mut font) => {
                 let hdc = unsafe { GetDC(Some(self.hwnd)) };
                 if hdc.is_invalid() {
@@ -335,8 +454,9 @@ impl App {
                 None,
             );
         }
-        self.layout();
-        self.update_status();
+        // Every launch starts with an untitled editable buffer so typing works
+        // without first creating a document.
+        self.new_document();
     }
 
     fn ensure_find_bar(&mut self) {
@@ -359,6 +479,8 @@ impl App {
         };
         let next = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_NEXT_BUTTON);
         let all = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_ALL_BUTTON);
+        let replace_one =
+            create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_REPLACE_ONE);
         let replace_all =
             create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_REPLACE_BUTTON);
         let case = create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_CASE);
@@ -367,11 +489,12 @@ impl App {
         let (
             Ok(next),
             Ok(all),
+            Ok(replace_one),
             Ok(replace_all),
             Ok(case),
             Ok(close),
             Ok(cancel),
-        ) = (next, all, replace_all, case, close, cancel)
+        ) = (next, all, replace_one, replace_all, case, close, cancel)
         else {
             self.status_message = "Creating find-bar controls failed".to_owned();
             return;
@@ -379,19 +502,34 @@ impl App {
         set_text(edit, "");
         set_text(replace, "");
         set_text(next, "Next");
-        set_text(all, "All");
-        set_text(replace_all, "Replace");
+        set_text(all, "Find All");
+        set_text(replace_one, "Replace");
+        set_text(replace_all, "Replace All");
         set_text(case, "Case");
         set_text(close, "X");
         set_text(cancel, "Stop");
         unsafe {
-            let _ = SetWindowSubclass(edit, Some(find_edit_proc), 1, 0);
+            // Return searches from the pattern field and replaces from the
+            // replacement field; Escape closes the bar from either field.
+            let _ = SetWindowSubclass(
+                edit,
+                Some(find_edit_proc),
+                SUBCLASS_FIND_EDIT,
+                ID_FIND_NEXT_BUTTON as usize,
+            );
+            let _ = SetWindowSubclass(
+                replace,
+                Some(find_edit_proc),
+                SUBCLASS_REPLACE_EDIT,
+                ID_FIND_REPLACE_ONE as usize,
+            );
         }
         let bar = FindBar {
             edit,
             replace,
             next,
             all,
+            replace_one,
             replace_all,
             case,
             close,
@@ -455,14 +593,89 @@ impl App {
                 );
             }
         }
+        // Full-row selection and double buffering are extended styles, so they
+        // are applied after creation rather than through the window style.
+        unsafe {
+            SendMessageW(
+                list,
+                LVM_SETEXTENDEDLISTVIEWSTYLE,
+                Some(WPARAM(LIST_VIEW_EX_STYLE as usize)),
+                Some(LPARAM(LIST_VIEW_EX_STYLE as isize)),
+            );
+        }
+        // A tracked tooltip reveals the full problem message that the fixed
+        // Message column width truncates.  The built-in LVS_EX_INFOTIP style
+        // cannot be used here: report-view owner-data lists only raise
+        // LVN_GETINFOTIP for subitem 0, never for the message column.
+        unsafe {
+            // SAFETY: `refdata` carries the owning top-level window so the
+            // subclass callback can reach the App state.
+            let _ = SetWindowSubclass(
+                list,
+                Some(results_list_proc),
+                SUBCLASS_RESULTS_LIST,
+                self.hwnd.0 as usize,
+            );
+        }
         show_window(list, false);
         self.results_list = Some(list);
         self.results_mode = ResultsMode::Hits;
+        self.fit_results_last_column(ResultsMode::Hits);
+        self.ensure_results_tip(list);
         Some(list)
     }
 
+    /// Stretches the preview column so the table fills the list client width.
+    ///
+    /// Line and Column keep their fixed widths so digits stay aligned, while
+    /// the Text/Message column absorbs whatever space the panel has, including
+    /// after the user drags the divider or resizes the floating frame.
+    fn fit_results_last_column(&mut self, mode: ResultsMode) {
+        let Some(list) = self.results_list else {
+            return;
+        };
+        let columns = match mode {
+            ResultsMode::Hits => &RESULT_COLUMNS,
+            ResultsMode::Problems => &PROBLEM_COLUMNS,
+        };
+        let last = columns.len().saturating_sub(1);
+        if last == 0 {
+            return;
+        }
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(list, &mut client) }.is_err() {
+            return;
+        }
+        let fixed: i32 = columns[..last].iter().map(|(_, width)| *width).sum();
+        // The vertical scrollbar and a small gutter would otherwise cover the
+        // tail of long previews.
+        let reserved = unsafe { GetSystemMetrics(SM_CXVSCROLL) } + RESULTS_PREVIEW_GUTTER;
+        let width = client
+            .right
+            .saturating_sub(fixed)
+            .saturating_sub(reserved)
+            .max(RESULTS_PREVIEW_MIN_WIDTH);
+        if width == self.results_preview_width {
+            return;
+        }
+        self.results_preview_width = width;
+        let mut column = LVCOLUMNW {
+            mask: LVCF_WIDTH,
+            cx: width,
+            ..Default::default()
+        };
+        unsafe {
+            SendMessageW(
+                list,
+                LVM_SETCOLUMNW,
+                Some(WPARAM(last)),
+                Some(LPARAM(&mut column as *mut LVCOLUMNW as isize)),
+            );
+        }
+    }
+
     /// Rewrites the list headers for the active table.
-    fn configure_results_columns(&self, list: HWND, mode: ResultsMode) {
+    fn configure_results_columns(&mut self, list: HWND, mode: ResultsMode) {
         let columns = match mode {
             ResultsMode::Hits => &RESULT_COLUMNS,
             ResultsMode::Problems => &PROBLEM_COLUMNS,
@@ -484,6 +697,10 @@ impl App {
                 );
             }
         }
+        // The loop just restored the declaration width, so the cached width is
+        // stale and the fit below must run again.
+        self.results_preview_width = 0;
+        self.fit_results_last_column(mode);
     }
 
     /// Switches the shared list between search hits and JSON problems.
@@ -494,6 +711,7 @@ impl App {
         self.results_mode = mode;
         if let Some(list) = self.results_list {
             self.configure_results_columns(list, mode);
+            self.hide_results_tip(list);
         }
         self.refresh_results_count();
     }
@@ -507,12 +725,316 @@ impl App {
         }
     }
 
+    /// Clears the JSON problem rows after a successful format or validation.
+    ///
+    /// The panel itself stays visible; only stale diagnostics are removed so
+    /// the UI does not keep reporting errors that no longer exist.
+    fn clear_problems(&mut self) {
+        self.problems.clear();
+        if self.results_mode == ResultsMode::Problems {
+            self.results_mode = ResultsMode::Hits;
+            if let Some(list) = self.results_list {
+                self.configure_results_columns(list, ResultsMode::Hits);
+            }
+        }
+        self.refresh_results_count();
+    }
+
+    /// Full text of one row, used by the hover info tip.
+    fn full_results_text(&self, index: usize) -> String {
+        match self.results_mode {
+            ResultsMode::Hits => {
+                let Some(row) = self.session.results.row(index) else {
+                    return String::new();
+                };
+                let preview = self.hit_preview_text(index);
+                if preview.is_empty() {
+                    format!("Ln {}, Col {}", row.line, row.column)
+                } else {
+                    format!("Ln {}, Col {}\n{preview}", row.line, row.column)
+                }
+            }
+            ResultsMode::Problems => self
+                .problems
+                .get(index)
+                .map(|problem| match &problem.hint {
+                    Some(hint) => format!("{} — {hint}", problem.message),
+                    None => problem.message.clone(),
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Line preview shown in the Text column for one hit.
+    fn hit_preview_text(&self, index: usize) -> String {
+        let Some(hit) = self.session.results.hit(index) else {
+            return String::new();
+        };
+        self.session
+            .read(|document| line_preview(document, hit))
+            .unwrap_or_default()
+    }
+
+    /// Repaints the results list after a dropped display request.
+    fn repaint_results(&mut self) {
+        let Some(list) = self.results_list else {
+            return;
+        };
+        let _ = unsafe { InvalidateRect(Some(list), None, true) };
+    }
+
     /// Number of rows in the active table.
     fn visible_row_count(&self) -> usize {
         match self.results_mode {
             ResultsMode::Hits => self.session.results.len(),
             ResultsMode::Problems => self.problems.len(),
         }
+    }
+
+    /// Creates the tracked tooltip used for hovered problem rows.
+    fn ensure_results_tip(&mut self, list: HWND) -> Option<HWND> {
+        if let Some(tip) = self.results_tip {
+            return Some(tip);
+        }
+        let instance = match unsafe { GetModuleHandleW(None) } {
+            Ok(module) => module,
+            Err(err) => {
+                self.status_message = format!("GetModuleHandleW failed: {err}");
+                return None;
+            }
+        };
+        // SAFETY: common controls are initialised and the owner window is live.
+        let tip = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                TOOLTIPS_CLASSW,
+                w!(""),
+                // Animation and fading make a tip that moves between rows blink
+                // continuously; showing it instantly keeps hover stable.
+                WINDOW_STYLE(
+                    WS_POPUP.0 | TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_NOANIMATE | TTS_NOFADE,
+                ),
+                0,
+                0,
+                0,
+                0,
+                Some(self.hwnd),
+                None,
+                Some(HINSTANCE(instance.0)),
+                None,
+            )
+        };
+        let tip = match tip {
+            Ok(hwnd) => hwnd,
+            Err(err) => {
+                self.status_message = format!("Creating the results tooltip failed: {err}");
+                return None;
+            }
+        };
+        // A tracked tooltip is shown manually, so it needs absolute screen
+        // positioning and a window handle to identify the tool.
+        let mut tool = TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
+            hwnd: list,
+            uId: list.0 as usize,
+            ..Default::default()
+        };
+        unsafe {
+            let dpi = GetDpiForWindow(self.hwnd);
+            let width = scale_for_dpi(RESULTS_TIP_MAX_WIDTH, dpi);
+            SendMessageW(
+                tip,
+                TTM_SETMAXTIPWIDTH,
+                Some(WPARAM(0)),
+                Some(LPARAM(width as isize)),
+            );
+            // Tracked tips are shown on demand; keep them readable instead of
+            // letting the default auto-pop timeout hide them mid-sentence.
+            SendMessageW(
+                tip,
+                TTM_SETDELAYTIME,
+                Some(WPARAM(TTDT_AUTOPOP as usize)),
+                Some(LPARAM(RESULTS_TIP_DURATION_MS)),
+            );
+            let added = SendMessageW(
+                tip,
+                TTM_ADDTOOLW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+            if added.0 == 0 {
+                let _ = DestroyWindow(tip);
+                self.status_message = "Registering the results tooltip failed".to_owned();
+                return None;
+            }
+        }
+        self.results_tip = Some(tip);
+        Some(tip)
+    }
+
+    /// Arms mouse-leave tracking for the results list exactly once.
+    fn track_results_leave(&mut self, list: HWND) {
+        if self.tip_tracking {
+            return;
+        }
+        let mut event = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: list,
+            dwHoverTime: 0,
+        };
+        // SAFETY: the list window is live and owns no conflicting tracking.
+        if unsafe { TrackMouseEvent(&mut event) }.is_ok() {
+            self.tip_tracking = true;
+        }
+    }
+
+    /// Updates the hover tip for the row under the pointer.
+    fn update_results_tip(&mut self, list: HWND, x: i32, y: i32) {
+        self.track_results_leave(list);
+        let mut hit = LVHITTESTINFO {
+            pt: POINT { x, y },
+            ..Default::default()
+        };
+        // SAFETY: the list is live and the LVHITTESTINFO outlives the message.
+        let index = unsafe {
+            SendMessageW(
+                list,
+                LVM_HITTEST,
+                None,
+                Some(LPARAM(&mut hit as *mut LVHITTESTINFO as isize)),
+            )
+        }
+        .0;
+        let Ok(index) = i32::try_from(index) else {
+            self.hide_results_tip(list);
+            return;
+        };
+        // LVM_HITTEST reports -1 when the pointer is not over an item.
+        if index < 0 {
+            self.hide_results_tip(list);
+            return;
+        }
+        let row = index as usize;
+        if self.tip_row == Some(row) {
+            return;
+        }
+        let text = self.full_results_text(row);
+        if text.is_empty() {
+            self.hide_results_tip(list);
+            return;
+        }
+        // Only arm the tip once the pointer rests: showing it on every row
+        // change makes the popup blink while the pointer sweeps the table.
+        if self.tip_pending_row == Some(row) {
+            return;
+        }
+        self.hide_results_tip(list);
+        self.tip_pending_row = Some(row);
+        // SAFETY: the window is live; the one-shot timer is cancelled as soon
+        // as it fires or another row is hovered.
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), TIMER_TIP, RESULTS_TIP_DELAY_MS, None);
+        }
+    }
+
+    /// Shows the tip for the row the pointer has been resting on.
+    fn show_pending_tip(&mut self) {
+        // SAFETY: killing a timer that already fired is harmless.
+        let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_TIP) };
+        let Some(row) = self.tip_pending_row.take() else {
+            return;
+        };
+        let Some(list) = self.results_list else {
+            return;
+        };
+        let text = self.full_results_text(row);
+        if !text.is_empty() {
+            self.show_results_tip(list, row, &text);
+        }
+    }
+
+    /// Drops a pending hover tip before its delay elapsed.
+    fn cancel_pending_tip(&mut self) {
+        if self.tip_pending_row.take().is_some() {
+            // SAFETY: killing an armed timer is always allowed.
+            let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_TIP) };
+        }
+    }
+
+    /// Activates the tip next to the pointer for one row.
+    fn show_results_tip(&mut self, list: HWND, row: usize, text: &str) {
+        let Some(tip) = self.results_tip else {
+            return;
+        };
+        // Re-track from scratch so the popup is sized for the new text; with
+        // animation disabled this swap is instantaneous instead of a blink.
+        self.hide_results_tip(list);
+        let mut wide = to_wide(text);
+        let mut tool = TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
+            hwnd: list,
+            uId: list.0 as usize,
+            lpszText: PWSTR(wide.as_mut_ptr()),
+            ..Default::default()
+        };
+        let mut point = POINT::default();
+        // SAFETY: the POINT is local and valid for the call.
+        if unsafe { GetCursorPos(&mut point) }.is_err() {
+            return;
+        }
+        let offset = scale_for_dpi(RESULTS_TIP_OFFSET, unsafe { GetDpiForWindow(self.hwnd) });
+        let position = LPARAM((((point.y + offset) as isize) << 16) | ((point.x + offset) as isize & 0xFFFF));
+        // SAFETY: the tooltip is live and the text buffer is stored in `self`
+        // before it can be read asynchronously during painting.
+        unsafe {
+            SendMessageW(
+                tip,
+                TTM_UPDATETIPTEXTW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+            SendMessageW(tip, TTM_TRACKPOSITION, Some(WPARAM(0)), Some(position));
+            SendMessageW(
+                tip,
+                TTM_TRACKACTIVATE,
+                Some(WPARAM(1)),
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+        }
+        // The tooltip keeps the pointer rather than copying the text.
+        self.tip_text = wide;
+        self.tip_row = Some(row);
+    }
+
+    /// Deactivates the tip without destroying the tooltip window.
+    fn hide_results_tip(&mut self, list: HWND) {
+        self.cancel_pending_tip();
+        let Some(tip) = self.results_tip else {
+            return;
+        };
+        if self.tip_row.is_none() {
+            return;
+        }
+        let mut tool = TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
+            hwnd: list,
+            uId: list.0 as usize,
+            ..Default::default()
+        };
+        // SAFETY: deactivating an active tracked tooltip is always allowed.
+        unsafe {
+            SendMessageW(
+                tip,
+                TTM_TRACKACTIVATE,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+        }
+        self.tip_row = None;
     }
 
     fn ensure_status_bar(&mut self) -> Option<HWND> {
@@ -528,7 +1050,7 @@ impl App {
         };
         // SAFETY: the common controls were initialised and the parent window
         // is live; the status bar owns itself until the parent is destroyed.
-        let style = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SBARS_SIZEGRIP);
+        let style = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0);
         let created = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -602,6 +1124,14 @@ impl App {
         }
     }
 
+    /// Space the find bar reserves at the bottom of the view area.
+    fn find_bar_height(&self) -> i32 {
+        match &self.find {
+            Some(bar) if bar.visible => FIND_BAR_HEIGHT,
+            _ => 0,
+        }
+    }
+
     /// Recomputes the status bar partitions for the given client width.
     ///
     /// The last partition uses `-1`, which the control extends to its right
@@ -629,23 +1159,6 @@ impl App {
                 SB_SETPARTS,
                 Some(WPARAM(STATUS_FIELD_COUNT)),
                 Some(LPARAM(edges.as_ptr() as isize)),
-            );
-        }
-        self.set_status_tip(statusbar::FIELD_ENCODING, ENCODING_TIP);
-        self.set_status_tip(statusbar::FIELD_EOL, EOL_TIP);
-    }
-
-    fn set_status_tip(&self, index: usize, text: &str) {
-        let Some(status) = self.status else {
-            return;
-        };
-        let mut wide = to_wide(text);
-        unsafe {
-            let _ = SendMessageW(
-                status,
-                SB_SETTIPTEXTW,
-                Some(WPARAM(index)),
-                Some(LPARAM(wide.as_mut_ptr() as isize)),
             );
         }
     }
@@ -681,7 +1194,7 @@ impl App {
             }
             self.apply_status_parts(width);
         }
-        let body_height = (height - self.status_height()).max(0);
+        let body_height = (height - self.status_height() - self.find_bar_height()).max(0);
         if !self.session.has_document() {
             self.hide_text();
             self.hide_hex();
@@ -690,7 +1203,7 @@ impl App {
             self.paint_frame();
             return;
         }
-        let split = ((width as f32) * TEXT_SPLIT_RATIO) as i32;
+        let split = self.split_x(width);
         match self.session.layout {
             ViewLayout::Text => {
                 self.position_text(0, 0, width, body_height);
@@ -718,16 +1231,150 @@ impl App {
                     self.position_text(0, 0, width, body_height);
                     self.hide_hex();
                 } else {
-                    let right = RESULTS_WIDTH.min((width / 2).max(0));
-                    let left = (width - right - SPLIT_GAP).max(0);
-                    self.position_text(0, 0, left, body_height);
+                    let split = self.results_split_y(body_height);
+                    let top = (split - SPLIT_GAP / 2).max(0);
+                    let bottom = (body_height - split - SPLIT_GAP / 2).max(0);
+                    self.position_text(0, 0, width, top);
                     self.hide_hex();
-                    self.position_results(left + SPLIT_GAP, 0, right, body_height);
+                    self.position_results(0, split + SPLIT_GAP / 2, width, bottom);
                 }
             }
         }
         self.layout_find_bar(body_height, width);
         self.paint_frame();
+    }
+
+    /// Horizontal client position of the text/hex divider.
+    fn split_x(&self, width: i32) -> i32 {
+        ((width as f32) * self.split_ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)) as i32
+    }
+
+    /// Vertical client position of the text/results divider.
+    fn results_split_y(&self, body_height: i32) -> i32 {
+        ((body_height as f32) * self.results_split_ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO))
+            as i32
+    }
+
+    /// Axis of the draggable divider under `(x, y)`, if any.
+    fn splitter_at(&self, x: i32, y: i32, width: i32, height: i32) -> Option<SplitAxis> {
+        let body_height = (height - self.status_height() - self.find_bar_height()).max(0);
+        let half = SPLIT_GAP / 2;
+        let slop = SPLITTER_HIT_SLOP;
+        match self.session.layout {
+            ViewLayout::TextAndHex => {
+                if y < 0 || y >= body_height {
+                    return None;
+                }
+                let split = self.split_x(width);
+                (split - half - slop..=split + half + slop)
+                    .contains(&x)
+                    .then_some(SplitAxis::Columns)
+            }
+            ViewLayout::TextAndResults if self.float_frame.is_none() => {
+                let split = self.results_split_y(body_height);
+                (split - half - slop..=split + half + slop)
+                    .contains(&y)
+                    .then_some(SplitAxis::Rows)
+            }
+            _ => None,
+        }
+    }
+
+    fn client_size(&self) -> (i32, i32) {
+        let mut rect = RECT::default();
+        match unsafe { GetClientRect(self.hwnd, &mut rect) } {
+            Ok(()) => (rect.right.max(0), rect.bottom.max(0)),
+            Err(_) => (0, 0),
+        }
+    }
+
+    /// Starts a divider drag when the left button goes down on it.
+    fn begin_split_drag(&mut self, x: i32, y: i32) -> bool {
+        let (width, height) = self.client_size();
+        let Some(axis) = self.splitter_at(x, y, width, height) else {
+            return false;
+        };
+        self.split_axis = Some(axis);
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        true
+    }
+
+    /// Moves the divider while the button is held down.
+    fn drag_split(&mut self, x: i32, y: i32) -> bool {
+        let Some(axis) = self.split_axis else {
+            return false;
+        };
+        let (width, height) = self.client_size();
+        match axis {
+            SplitAxis::Columns => {
+                let width = width.max(1);
+                let ratio = (x as f32 / width as f32).clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
+                if (ratio - self.split_ratio).abs() > f32::EPSILON {
+                    self.split_ratio = ratio;
+                    self.layout();
+                }
+            }
+            SplitAxis::Rows => {
+                let body_height =
+                    (height - self.status_height() - self.find_bar_height()).max(1);
+                let ratio =
+                    (y as f32 / body_height as f32).clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
+                if (ratio - self.results_split_ratio).abs() > f32::EPSILON {
+                    self.results_split_ratio = ratio;
+                    self.layout();
+                }
+            }
+        }
+        true
+    }
+
+    /// Ends a divider drag and releases the mouse capture.
+    fn end_split_drag(&mut self) -> bool {
+        if self.split_axis.is_none() {
+            return false;
+        }
+        self.split_axis = None;
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        true
+    }
+
+    /// Shows the resize cursor while the pointer is over the divider.
+    fn splitter_cursor(&self) -> bool {
+        let axis = match self.split_axis {
+            Some(axis) => axis,
+            None => {
+                let mut point = POINT::default();
+                if unsafe { GetCursorPos(&mut point) }.is_err() {
+                    return false;
+                }
+                let converted = unsafe { ScreenToClient(self.hwnd, &mut point) };
+                if !converted.as_bool() {
+                    return false;
+                }
+                let (width, height) = self.client_size();
+                let Some(axis) = self.splitter_at(point.x, point.y, width, height) else {
+                    return false;
+                };
+                axis
+            }
+        };
+        let resource = match axis {
+            SplitAxis::Columns => IDC_SIZEWE,
+            SplitAxis::Rows => IDC_SIZENS,
+        };
+        match unsafe { LoadCursorW(None, resource) } {
+            Ok(cursor) => {
+                unsafe {
+                    SetCursor(Some(cursor));
+                }
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn layout_find_bar(&mut self, body_height: i32, width: i32) {
@@ -739,30 +1386,33 @@ impl App {
         }
         let row_one = body_height + FIND_ROW_GAP;
         let row_two = row_one + FIND_ROW_HEIGHT + FIND_ROW_GAP;
-        let close_width = 28;
-        let button_width = 72;
-        let case_width = 56;
         let available = (width
-            - button_width * 3
-            - case_width
-            - close_width
+            - FIND_BUTTON_WIDTH * 3
+            - FIND_CASE_WIDTH
+            - FIND_CLOSE_WIDTH
             - FIND_ROW_GAP * 5)
             .max(0);
         let edit_width = available;
         move_control(bar.edit, FIND_ROW_GAP, row_one, edit_width, FIND_ROW_HEIGHT);
         let x = FIND_ROW_GAP + edit_width + FIND_ROW_GAP;
-        move_control(bar.next, x, row_one, button_width, FIND_ROW_HEIGHT);
-        let x = x + button_width + FIND_ROW_GAP;
-        move_control(bar.all, x, row_one, button_width, FIND_ROW_HEIGHT);
-        let x = x + button_width + FIND_ROW_GAP;
-        move_control(bar.case, x, row_one, case_width, FIND_ROW_HEIGHT);
-        let x = x + case_width + FIND_ROW_GAP;
-        move_control(bar.close, x, row_one, close_width, FIND_ROW_HEIGHT);
-        let replace_width = (width - button_width - FIND_CANCEL_WIDTH - FIND_ROW_GAP * 5).max(0);
+        move_control(bar.next, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
+        move_control(bar.all, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
+        move_control(bar.case, x, row_one, FIND_CASE_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_CASE_WIDTH + FIND_ROW_GAP;
+        move_control(bar.close, x, row_one, FIND_CLOSE_WIDTH, FIND_ROW_HEIGHT);
+        let replace_width = (width
+            - FIND_BUTTON_WIDTH * 2
+            - FIND_CANCEL_WIDTH
+            - FIND_ROW_GAP * 5)
+            .max(0);
         move_control(bar.replace, FIND_ROW_GAP, row_two, replace_width, FIND_ROW_HEIGHT);
         let x = FIND_ROW_GAP + replace_width + FIND_ROW_GAP;
-        move_control(bar.replace_all, x, row_two, button_width, FIND_ROW_HEIGHT);
-        let x = x + button_width + FIND_ROW_GAP;
+        move_control(bar.replace_one, x, row_two, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
+        move_control(bar.replace_all, x, row_two, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.cancel, x, row_two, FIND_CANCEL_WIDTH, FIND_ROW_HEIGHT);
     }
 
@@ -796,6 +1446,9 @@ impl App {
                 let _ = MoveWindow(list, x, y, width.max(0), height.max(0), true);
             }
             show_window(list, true);
+            // The panel width drives the preview column, so the columns must
+            // follow every resize instead of keeping the creation-time widths.
+            self.fit_results_last_column(self.results_mode);
         }
     }
 
@@ -822,6 +1475,30 @@ impl App {
         }
     }
 
+    /// Moves keyboard focus into the view the current layout shows.
+    ///
+    /// Without this the window keeps focus on itself after launch, document
+    /// changes and dialogs, so typing would not reach the editor until the
+    /// user clicked inside it.
+    fn focus_active_view(&self) {
+        if self.session.layout != ViewLayout::Hex {
+            match &self.text {
+                Some(TextHandle::Scintilla(control)) => {
+                    control.focus();
+                    return;
+                }
+                Some(TextHandle::Large(view)) => {
+                    let _ = unsafe { SetFocus(Some(view.hwnd())) };
+                    return;
+                }
+                None => {}
+            }
+        }
+        if let Some(view) = &self.hex {
+            let _ = unsafe { SetFocus(Some(view.hwnd())) };
+        }
+    }
+
     fn ensure_hex(&mut self) -> Option<HWND> {
         if let Some(view) = &self.hex {
             return Some(view.hwnd());
@@ -830,7 +1507,8 @@ impl App {
         if let Some(shared) = &self.session.doc {
             data.borrow_mut().doc = Some(shared.clone());
         }
-        match ViewWindow::create(self.hwnd, ViewKind::Hex, data) {
+        let points = self.text_font_points();
+        match ViewWindow::create(self.hwnd, ViewKind::Hex, data, points) {
             Ok(view) => {
                 let hwnd = view.hwnd();
                 self.hex = Some(view);
@@ -843,9 +1521,29 @@ impl App {
         }
     }
 
+    /// Font size in points the hex view must use so its glyphs match the text
+    /// view, including any zoom the user applied to the Scintilla control.
+    fn text_font_points(&self) -> i32 {
+        match &self.text {
+            Some(TextHandle::Scintilla(control)) => MONO_POINTS.saturating_add(control.zoom()),
+            _ => MONO_POINTS,
+        }
+    }
+
+    /// Keeps the hex cell size in step with Scintilla's Ctrl+wheel zoom.
+    fn apply_text_zoom(&mut self) {
+        let points = self.text_font_points();
+        if let Some(hex) = &self.hex {
+            hex.set_font_points(points);
+        }
+    }
+
     fn rebuild_text_view(&mut self, shared: &SharedDoc) {
         self.text = None;
         self.text_data = None;
+        self.last_text_selection = None;
+        // Reset until the new document proves it can accept edits.
+        self.editing = false;
         let (kind, text_available, text, eol) = {
             let guard = shared
                 .read()
@@ -867,7 +1565,9 @@ impl App {
                     control.apply_style(FONT_FACE, MONO_POINTS, margin);
                     let document_text = text.unwrap_or_default();
                     control.set_text(&document_text);
-                    control.set_read_only(true);
+                    // Opened files start editable; the toggle can revoke it.
+                    self.editing = true;
+                    control.set_read_only(false);
                     control.set_eol(eol);
                     tracing::info!(
                         text_bytes = document_text.len(),
@@ -887,7 +1587,7 @@ impl App {
             doc: Some(shared.clone()),
             ..Default::default()
         }));
-        match ViewWindow::create(self.hwnd, ViewKind::Text, data.clone()) {
+        match ViewWindow::create(self.hwnd, ViewKind::Text, data.clone(), MONO_POINTS) {
             Ok(view) => {
                 self.text = Some(TextHandle::Large(view));
                 self.text_data = Some(data);
@@ -904,6 +1604,7 @@ impl App {
             view.doc = Some(shared.clone());
             view.first_line = 0;
             view.first_row = 0;
+            view.h_offset = 0;
             view.highlights.clear();
             view.sel = None;
         }
@@ -913,6 +1614,7 @@ impl App {
             state.doc = Some(shared.clone());
             state.first_line = 0;
             state.first_row = 0;
+            state.h_offset = 0;
             state.highlights.clear();
             state.sel = None;
         }
@@ -935,10 +1637,12 @@ impl App {
     }
 
     fn new_document(&mut self) {
+        if !self.confirm_transition() {
+            return;
+        }
         self.cancel_search();
         self.watcher = None;
         self.hex = None;
-        self.editing = false;
         self.follow_tail = false;
         self.reset_results_table();
         let shared = self.session.new_blank();
@@ -955,13 +1659,16 @@ impl App {
         }
         self.layout();
         self.update_status();
+        self.focus_active_view();
     }
 
     fn open_document(&mut self, path: PathBuf) {
+        if !self.confirm_transition() {
+            return;
+        }
         self.cancel_search();
         match self.session.open(&path) {
             Ok(shared) => {
-                self.editing = false;
                 self.hex = None;
                 self.follow_tail = false;
                 self.reset_results_table();
@@ -995,10 +1702,16 @@ impl App {
                     confidence,
                     "document opened"
                 );
-                self.status_message = format!("Opened {}", path.display());
+                self.record_recent(&path);
+                self.status_message = if kind.is_editable() {
+                    format!("Opened {}", path.display())
+                } else {
+                    format!("Opened {} (read-only)", path.display())
+                };
                 self.refresh_title();
                 self.layout();
                 self.update_status();
+                self.focus_active_view();
             }
             Err(err) => {
                 tracing::error!(path = %path.display(), error = %err, "open failed");
@@ -1007,8 +1720,56 @@ impl App {
         }
     }
 
+    /// Opens the recent-file entry selected from the File menu.
+    fn open_recent(&mut self, command: u32) {
+        let index = (command - ID_FILE_RECENT_FIRST) as usize;
+        let path = self.recent.paths().get(index).cloned();
+        match path {
+            Some(path) => self.open_document(path),
+            None => {
+                self.status_message = "The recent-file entry is no longer available".to_owned();
+                self.update_status();
+            }
+        }
+    }
+
+    /// Records an opened path and refreshes the menu when the list changed.
+    fn record_recent(&mut self, path: &Path) {
+        if self.recent.record(path) {
+            self.refresh_menu();
+        }
+    }
+
+    /// Rebuilds the whole menu so File > Recent Files matches [`RecentFiles`].
+    fn refresh_menu(&mut self) {
+        let menu = match build_menu(&self.recent) {
+            Ok(menu) => menu,
+            Err(err) => {
+                tracing::warn!(error = %err, "menu rebuild failed");
+                return;
+            }
+        };
+        let previous = unsafe { GetMenu(self.hwnd) };
+        if unsafe { SetMenu(self.hwnd, Some(menu)) }.is_err() {
+            unsafe {
+                let _ = DestroyMenu(menu);
+            }
+            tracing::warn!("menu installation failed");
+            return;
+        }
+        unsafe {
+            let _ = DrawMenuBar(self.hwnd);
+        }
+        if !previous.0.is_null() {
+            unsafe {
+                let _ = DestroyMenu(previous);
+            }
+        }
+        self.sync_command_state();
+    }
+
     fn close_document(&mut self) {
-        if self.confirm_discard() != Some(true) {
+        if !self.confirm_transition() {
             return;
         }
         self.cancel_search();
@@ -1026,13 +1787,19 @@ impl App {
                 SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0)));
             }
         }
+        // A window without a document has no editor and most commands stay
+        // disabled; closing the last document therefore opens a blank one so
+        // the app remains immediately usable.
+        if !self.session.has_document() {
+            self.new_document();
+        }
         self.status_message = "Document closed".to_owned();
         self.refresh_title();
         self.layout();
         self.update_status();
     }
 
-    fn save(&mut self, target: Option<PathBuf>) {
+    fn save(&mut self, target: Option<PathBuf>) -> SaveOutcome {
         self.cancel_search();
         let text = match &self.text {
             Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
@@ -1041,19 +1808,21 @@ impl App {
         let Some(text) = text else {
             self.status_message = "Editing requires the Scintilla text view".to_owned();
             self.update_status();
-            return;
+            return SaveOutcome::Failed;
         };
         let current = self.session.read(|doc| doc.path.clone()).flatten();
+        let previous_path = current.clone();
         let path = match target.or(current) {
             Some(path) => path,
             None => match pick_file(self.hwnd, true, None) {
                 Some(path) => path,
-                None => return,
+                None => return SaveOutcome::Cancelled,
             },
         };
         let Some(shared) = self.session.doc.clone() else {
             self.status_message = "No document".to_owned();
-            return;
+            self.update_status();
+            return SaveOutcome::Failed;
         };
         let request = SaveRequest {
             text: &text,
@@ -1075,20 +1844,35 @@ impl App {
                     control.set_eol(eol);
                     control.mark_saved();
                 }
+                // Save As moves the document to a new path, so external
+                // changes must be watched there instead of the old file.
+                if previous_path.as_deref() != Some(path.as_path()) {
+                    self.watcher = match ChangeWatcher::new(&path) {
+                        Ok(watcher) => Some(watcher),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "file change watcher unavailable");
+                            None
+                        }
+                    };
+                }
+                self.record_recent(&path);
                 self.status_message = format!("Saved {}", path.display());
                 self.refresh_title();
+                self.update_status();
+                SaveOutcome::Saved
             }
             Err(err) => {
                 self.show_message(MB_ICONERROR, "Save failed", &describe_save_error(&err));
+                self.update_status();
+                SaveOutcome::Failed
             }
         }
-        self.update_status();
     }
 
     fn save_as(&mut self) {
         let initial = self.session.read(|doc| doc.path.clone()).flatten();
         if let Some(path) = pick_file(self.hwnd, true, initial.as_deref()) {
-            self.save(Some(path));
+            let _ = self.save(Some(path));
         }
     }
 
@@ -1306,132 +2090,6 @@ impl App {
         self.update_status();
     }
 
-    /// Opens the encoding menu at the cursor.
-    fn open_encoding_menu(&mut self) {
-        tracing::info!("encoding menu opened");
-        let Some(menu) = create_menu_or_report() else {
-            return;
-        };
-        let state = self.session.read(|doc| {
-            (
-                doc.encoding.charset,
-                doc.encoding.bom,
-                doc.write_policy.bom,
-                doc.write_policy.charset,
-                doc.confidence,
-            )
-        });
-        let Some((charset, bom, bom_policy, target_charset, confidence)) = state else {
-            unsafe {
-                let _ = DestroyMenu(menu);
-            }
-            return;
-        };
-        let writable = self.writable_text();
-        let header = format!(
-            "{MENU_HEADER_ENCODING}: {} · {} ({:.0}%)",
-            charset.display_name(),
-            bom.display_name(),
-            f32::from(confidence) * PERCENT_SCALE
-        );
-        unsafe {
-            append(menu, MF_STRING | MF_DISABLED, 0, &header);
-            append(menu, MF_SEPARATOR, 0, "");
-            append(menu, MF_STRING | MF_DISABLED, 0, MENU_REINTERPRET);
-            for (id, name) in CHARSET_MENU_ITEMS {
-                let flags = if name == charset.display_name() {
-                    MF_STRING | MF_CHECKED
-                } else {
-                    MF_STRING
-                };
-                append(menu, flags, id, name);
-            }
-            append(menu, MF_SEPARATOR, 0, "");
-            append(menu, MF_STRING | MF_DISABLED, 0, MENU_CONVERT);
-            for (id, name) in CONVERT_MENU_ITEMS {
-                let mut flags = MF_STRING;
-                if !writable {
-                    flags = flags | MF_GRAYED;
-                }
-                if name == target_charset.display_name() {
-                    flags = flags | MF_CHECKED;
-                }
-                append(menu, flags, id, name);
-            }
-            append(menu, MF_SEPARATOR, 0, "");
-            append(menu, MF_STRING | MF_DISABLED, 0, MENU_BOM);
-            let bom_flags = |policy: BomPolicy, current: BomPolicy| {
-                let mut flags = MF_STRING;
-                if !writable {
-                    flags = flags | MF_GRAYED;
-                }
-                if policy == current {
-                    flags = flags | MF_CHECKED;
-                }
-                flags
-            };
-            append(menu, bom_flags(BomPolicy::Keep, bom_policy), ID_BOM_KEEP, "Keep");
-            append(menu, bom_flags(BomPolicy::Add, bom_policy), ID_BOM_ADD, "Add");
-            append(menu, bom_flags(BomPolicy::Strip, bom_policy), ID_BOM_STRIP, "Strip");
-        }
-        let command = self.track_menu(menu);
-        if command != 0 {
-            self.command(command);
-        }
-    }
-
-    /// Opens the end-of-line menu at the cursor.
-    fn open_eol_menu(&mut self) {
-        tracing::info!("eol menu opened");
-        let Some(menu) = create_menu_or_report() else {
-            return;
-        };
-        let state = self.session.read(|doc| {
-            (doc.eol, doc.write_policy.eol)
-        });
-        let Some((eol, policy)) = state else {
-            unsafe {
-                let _ = DestroyMenu(menu);
-            }
-            return;
-        };
-        let writable = self.writable_text();
-        let mixed = if eol.mixed {
-            format!(" · Mixed {}:{}", eol.crlf, eol.lf)
-        } else {
-            String::new()
-        };
-        let header = format!(
-            "{MENU_HEADER_EOL}: CRLF {} / LF {} / CR {}{mixed}",
-            eol.crlf, eol.lf, eol.cr
-        );
-        unsafe {
-            append(menu, MF_STRING | MF_DISABLED, 0, &header);
-            append(menu, MF_SEPARATOR, 0, "");
-            let keep = if policy == EolWritePolicy::Preserve {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING
-            };
-            append(menu, keep, ID_EOL_PRESERVE, MENU_KEEP_AS_IS);
-            append(menu, MF_SEPARATOR, 0, "");
-            let convert = |id: u32, text: &str| {
-                let mut flags = MF_STRING;
-                if !writable {
-                    flags = flags | MF_GRAYED;
-                }
-                append(menu, flags, id, text);
-            };
-            convert(ID_EOL_CRLF, MENU_CONVERT_WINDOWS);
-            convert(ID_EOL_LF, MENU_CONVERT_UNIX);
-            convert(ID_EOL_CR, MENU_CONVERT_MAC);
-        }
-        let command = self.track_menu(menu);
-        if command != 0 {
-            self.command(command);
-        }
-    }
-
     /// Runs a modal popup menu and returns the chosen command id.
     ///
     /// `TrackPopupMenuEx` returns the command id because `TPM_RETURNCMD` is
@@ -1475,6 +2133,7 @@ impl App {
                     control.set_text(&output.text);
                 }
                 self.mark_buffer_dirty();
+                self.clear_problems();
                 self.status_message = if minify {
                     "JSON minified".to_owned()
                 } else {
@@ -1499,6 +2158,7 @@ impl App {
         let provider = JsonFormatProvider;
         match provider.validate(&text) {
             Ok(()) => {
+                self.clear_problems();
                 self.status_message = "JSON is valid".to_owned();
             }
             Err(diagnostics) => self.show_diagnostics(&diagnostics),
@@ -1564,14 +2224,14 @@ impl App {
                     self.set_layout(ViewLayout::Text);
                 }
                 self.hit_cursor = index.saturating_add(1);
-                self.navigate_to(&hit);
+                self.navigate_to(&hit, true);
             }
             ID_RESULTS_SHOW_HEX => {
                 if self.session.layout != ViewLayout::Hex {
                     self.set_layout(ViewLayout::Hex);
                 }
                 self.hit_cursor = index.saturating_add(1);
-                self.navigate_to(&hit);
+                self.navigate_to(&hit, true);
             }
             _ => {}
         }
@@ -1579,7 +2239,54 @@ impl App {
 
     fn mark_buffer_dirty(&mut self) {
         self.cancel_search();
-        self.session.write(rnotepad_core::document::Document::mark_dirty);
+        let revision = self.session.write(|document| {
+            rnotepad_core::document::Document::mark_dirty(document);
+            document.revision
+        });
+        // Hits collected before this edit point at offsets that may no longer
+        // exist, so flag the result set as stale until the next search.
+        if let Some(revision) = revision {
+            self.session.results.sync_revision(revision);
+        }
+    }
+
+    /// Selected text that may seed the find field, when it is a single line.
+    ///
+    /// Multi-line and whitespace-only selections are rejected: the find field
+    /// is a single-line edit control, and a blank pattern would only produce
+    /// confusing match feedback.
+    fn selection_for_find(&self) -> Option<String> {
+        let Some(TextHandle::Scintilla(control)) = &self.text else {
+            return None;
+        };
+        let (start, end) = control.selection();
+        if start >= end {
+            return None;
+        }
+        let text = control.text_range(start, end);
+        if text.contains('\r') || text.contains('\n') || text.trim().is_empty() {
+            return None;
+        }
+        Some(text)
+    }
+
+    /// Seeds the find field with the current selection when it is usable.
+    ///
+    /// Without a usable selection the field keeps whatever the user typed, so
+    /// pressing Ctrl+F twice never destroys an existing pattern.
+    fn prefill_find_pattern(&mut self) {
+        let Some(pattern) = self.selection_for_find() else {
+            return;
+        };
+        let Some(bar) = self.find.as_ref() else {
+            return;
+        };
+        set_text(bar.edit, &pattern);
+        // Selecting the seeded text lets the user either type a fresh pattern
+        // or press Enter immediately to search for it.
+        unsafe {
+            let _ = SendMessageW(bar.edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
     }
 
     fn find_pattern(&self) -> Option<String> {
@@ -1618,13 +2325,31 @@ impl App {
             unsafe {
                 let _ = SetFocus(Some(bar.edit));
             }
+        } else {
+            // Returning to the editor keeps typing seamless after Escape or
+            // the close button.
+            self.focus_active_view();
         }
-        let mut client = RECT::default();
-        if unsafe { GetClientRect(self.hwnd, &mut client) }.is_ok() {
-            let body = (client.bottom - self.status_height()).max(0);
-            self.layout_find_bar(body, client.right);
+        // The bar reserves space above the status bar, so the panes must be
+        // re-laid out whenever it appears or disappears.
+        self.layout();
+    }
+
+    /// Shows the find bar, seeding the pattern field from the selection.
+    fn open_find(&mut self) {
+        self.prefill_find_pattern();
+        self.toggle_find_bar(true);
+    }
+
+    /// Shows the find bar and puts the caret in the replacement field.
+    fn open_replace(&mut self) {
+        self.prefill_find_pattern();
+        self.toggle_find_bar(true);
+        if let Some(bar) = self.find.as_ref() {
+            unsafe {
+                let _ = SetFocus(Some(bar.replace));
+            }
         }
-        self.paint_frame();
     }
 
     fn find_next(&mut self) {
@@ -1757,6 +2482,27 @@ impl App {
         view.invalidate();
     }
 
+    /// Enables or disables the optional file log from the Help menu.
+    fn toggle_logging(&mut self) {
+        if crate::logging_enabled() {
+            crate::disable_logging();
+            self.status_message = "Logging disabled".to_owned();
+        } else {
+            match crate::enable_logging() {
+                Ok(()) => {
+                    self.status_message =
+                        "Logging enabled: logs/rnotepad.<date>.log".to_owned();
+                    tracing::info!("file logging enabled");
+                }
+                Err(err) => {
+                    self.status_message = format!("Logging unavailable: {err}");
+                    self.show_message(MB_ICONERROR, "Logging", &err);
+                }
+            }
+        }
+        self.update_status();
+    }
+
     /// Docks a floating results panel or detaches the docked one.
     fn toggle_results_float(&mut self) {
         if self.float_frame.is_some() {
@@ -1847,6 +2593,7 @@ impl App {
             return;
         }
         move_control(list, 0, 0, client.right, client.bottom);
+        self.fit_results_last_column(self.results_mode);
     }
 
     fn poll_job(&mut self) {
@@ -1959,11 +2706,16 @@ impl App {
         let index = self.hit_cursor % len;
         self.hit_cursor = (index + 1) % len;
         if let Some(hit) = self.session.results.hit(index).copied() {
-            self.navigate_to(&hit);
+            self.navigate_to(&hit, true);
         }
     }
 
-    fn navigate_to(&mut self, hit: &MatchHit) {
+    /// Moves the active view to one hit.
+    ///
+    /// `select_match` selects the whole match (Find Next, context-menu jumps);
+    /// when false the caret is parked at the hit start instead, which is what
+    /// double-clicking a results row should do.
+    fn navigate_to(&mut self, hit: &MatchHit, select_match: bool) {
         let Some(shared) = self.session.doc.clone() else {
             return;
         };
@@ -1982,7 +2734,8 @@ impl App {
                     .coord
                     .raw_to_utf8(RawByteOffset(raw.saturating_add(length)));
                 if let (Some(start), Some(end)) = (start, end) {
-                    control.set_selection(start.0, end.0);
+                    let stop = if select_match { end.0 } else { start.0 };
+                    control.set_selection(start.0, stop);
                     control.focus();
                 } else {
                     control.scroll_to_line(line_no);
@@ -2064,9 +2817,10 @@ impl App {
                     control.set_selection(start, end);
                     self.syncing = false;
                 }
-            } else if let (Some(data), Some(line)) = (&self.text_data, line) {
-                data.borrow_mut().first_line = line;
-                if let Some(TextHandle::Large(view)) = &self.text {
+                self.last_text_selection = Some((start, end));
+            } else if let Some(TextHandle::Large(view)) = &self.text {
+                if let Some(line) = line {
+                    view.reveal_line(line);
                     view.refresh_scroll();
                     view.invalidate();
                 }
@@ -2074,12 +2828,13 @@ impl App {
             return;
         }
         if let Some(hex) = &self.hex {
+            let row = selection.start / HEX_BYTES_PER_ROW;
             {
                 let data = hex.data();
                 let mut state = data.borrow_mut();
                 state.sel = Some(selection.clone());
-                state.first_row = selection.start / HEX_BYTES_PER_ROW as u64;
             }
+            hex.reveal_row(row);
             hex.refresh_scroll();
             hex.invalidate();
         }
@@ -2097,6 +2852,13 @@ impl App {
             return;
         };
         let (start, end) = control.selection();
+        // `SCN_UPDATEUI` is also sent after a repaint that only scrolled the
+        // text pane.  Without this check the hex viewport would jump to the
+        // caret and the byte selection would be replaced.
+        if self.last_text_selection == Some((start, end)) {
+            return;
+        }
+        self.last_text_selection = Some((start, end));
         let (start, end) = if start == end {
             let caret = control.current_position();
             (caret, caret.saturating_add(1))
@@ -2117,18 +2879,44 @@ impl App {
         if start >= end {
             return;
         }
+        let row = start / HEX_BYTES_PER_ROW;
         {
             let data = hex.data();
             let mut state = data.borrow_mut();
             state.sel = Some(start..end);
-            state.first_row = start / HEX_BYTES_PER_ROW as u64;
         }
+        hex.reveal_row(row);
         hex.refresh_scroll();
         hex.invalidate();
     }
 
-    /// Copies the selection of the focused view.
+    /// The find-bar edit control that owns keyboard focus, if any.
+    ///
+    /// Ctrl+C is a window-level accelerator, so the copy handler must consult
+    /// the focused control instead of assuming the editor always owns keys.
+    fn focused_find_edit(&self) -> Option<HWND> {
+        let focus = unsafe { GetFocus() };
+        let bar = self.find.as_ref()?;
+        if focus == bar.edit {
+            Some(bar.edit)
+        } else if focus == bar.replace {
+            Some(bar.replace)
+        } else {
+            None
+        }
+    }
+
+    /// Copies the selection of the focused control.
     fn copy_selection(&mut self) {
+        // The find fields are ordinary edit controls and copy their own
+        // selection when the accelerator fires while they own focus.
+        if let Some(edit) = self.focused_find_edit() {
+            // SAFETY: the edit control is alive and handles WM_COPY itself.
+            unsafe {
+                let _ = SendMessageW(edit, WM_COPY, None, None);
+            }
+            return;
+        }
         let focus = unsafe { GetFocus() };
         if let Some(hex) = &self.hex {
             if focus == hex.hwnd() {
@@ -2158,10 +2946,20 @@ impl App {
             }
         }
         if let Some(TextHandle::Scintilla(control)) = &self.text {
+            let (start, end) = control.selection();
+            if start >= end {
+                // Never fail silently: an empty selection would otherwise look
+                // like the clipboard shortcut did nothing.
+                self.status_message = "Nothing selected to copy".to_owned();
+                self.update_status();
+                return;
+            }
             // SAFETY: the control is alive and handles WM_COPY itself.
             unsafe {
                 let _ = SendMessageW(control.hwnd(), WM_COPY, None, None);
             }
+            self.status_message = "Copied selection".to_owned();
+            self.update_status();
         }
     }
 
@@ -2213,6 +3011,47 @@ impl App {
         self.update_status();
     }
 
+    fn replace_one(&mut self) {
+        if !self.editing {
+            self.status_message = "Enable editing before replacing".to_owned();
+            self.update_status();
+            return;
+        }
+        let Some(pattern) = self.find_pattern() else {
+            self.status_message = "Enter a search pattern".to_owned();
+            self.update_status();
+            return;
+        };
+        let replacement = self.find_replacement();
+        let case = self.find_case_sensitive();
+        let Some(TextHandle::Scintilla(control)) = &self.text else {
+            self.status_message = "Replace needs the Scintilla text view".to_owned();
+            self.update_status();
+            return;
+        };
+        let (start, end) = control.selection();
+        // Replace the current match when the selection already is one; otherwise
+        // advance to the next match, which matches Find Next semantics.
+        let target = if start < end
+            && text_matches(&control.text_range(start, end), &pattern, case)
+        {
+            Some((start, end))
+        } else {
+            control.find(&pattern, case, false, false, end, true)
+        };
+        let Some((start, end)) = target else {
+            self.status_message = format!("No match for \"{pattern}\"");
+            self.update_status();
+            return;
+        };
+        control.set_selection(start, end);
+        control.replace_selection(&replacement);
+        control.focus();
+        self.mark_buffer_dirty();
+        self.status_message = format!("Replaced 1 occurrence at bytes {start}..{end}");
+        self.update_status();
+    }
+
     fn replace_all(&mut self) {
         if !self.editing {
             self.status_message = "Enable editing before replacing".to_owned();
@@ -2249,42 +3088,128 @@ impl App {
         if !changed {
             return;
         }
+        // A burst of notifications for a file that already matches the loaded
+        // revision must not rebuild the view on every timer tick.
+        if !self.file_changed_on_disk() {
+            return;
+        }
         let dirty = self.is_dirty();
         if dirty {
             self.status_message =
-                "The file changed on disk; save or reopen to refresh".to_owned();
+                "The file changed on disk; use File > Reload to refresh".to_owned();
             self.update_status();
             return;
         }
+        match self.reload_document() {
+            Ok(()) => self.status_message = "Reloaded after an external change".to_owned(),
+            Err(err) => self.status_message = format!("Reload failed: {err}"),
+        }
+        self.update_status();
+    }
+
+    /// Explicit File > Reload command.
+    ///
+    /// Unsaved edits are confirmed first, so the command can never discard
+    /// them silently; a document without a backing file has nothing to reload.
+    fn reload_from_disk(&mut self) {
+        let has_path = self
+            .session
+            .read(|doc| doc.path.is_some())
+            .unwrap_or(false);
+        if !has_path {
+            self.status_message = "Nothing to reload: the document has no file on disk".to_owned();
+            self.update_status();
+            return;
+        }
+        if !self.confirm_transition() {
+            return;
+        }
+        match self.reload_document() {
+            Ok(()) => self.status_message = "Reloaded from disk".to_owned(),
+            Err(err) => self.status_message = format!("Reload failed: {err}"),
+        }
+        self.update_status();
+    }
+
+    /// Reloads the document from disk and refreshes the attached views.
+    ///
+    /// Returns a user-facing error description; the caller owns the status
+    /// message because the reason for reloading differs (timer vs. command).
+    fn reload_document(&mut self) -> Result<(), String> {
         self.cancel_search();
         let Some(shared) = self.session.doc.clone() else {
-            return;
+            return Err("No document".to_owned());
         };
-        let result = {
+        let previous = self
+            .session
+            .read(|doc| (doc.kind, doc.text_available))
+            .unwrap_or((DocumentKind::LargeReadOnly, false));
+        {
             let mut guard = shared
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.reload()
-        };
-        match result {
-            Ok(()) => {
-                self.rebuild_text_view(&shared);
-                self.attach_document(&shared);
-                if let Some(view) = &self.hex {
-                    view.refresh_scroll();
-                    view.invalidate();
-                }
-                self.status_message = "Reloaded after an external change".to_owned();
-                self.layout();
-                if self.follow_tail {
-                    self.scroll_large_to_end();
-                }
-            }
-            Err(err) => {
-                self.status_message = format!("Reload failed: {err}");
-            }
+            guard.reload().map_err(|err| err.to_string())?;
         }
-        self.update_status();
+        let current = self
+            .session
+            .read(|doc| (doc.kind, doc.text_available))
+            .unwrap_or(previous);
+        if current == previous {
+            // Reloading a live log must not recreate the view; that flashes
+            // the pane and drops the scroll position.
+            self.refresh_text_view();
+        } else {
+            self.rebuild_text_view(&shared);
+            self.attach_document(&shared);
+            self.layout();
+        }
+        if let Some(view) = &self.hex {
+            view.refresh_scroll();
+            view.invalidate();
+        }
+        if self.follow_tail {
+            self.scroll_large_to_end();
+        }
+        Ok(())
+    }
+
+
+    /// `true` when the file on disk differs from the opened revision.
+    fn file_changed_on_disk(&self) -> bool {
+        let Some(path) = self.session.read(|doc| doc.path.clone()).flatten() else {
+            return true;
+        };
+        let (opened_size, opened_mtime) = self
+            .session
+            .read(|doc| (doc.opened_size, doc.opened_mtime))
+            .unwrap_or((0, None));
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                metadata.len() != opened_size || metadata.modified().ok() != opened_mtime
+            }
+            // A missing or unreadable file should reach the reload error path.
+            Err(_) => true,
+        }
+    }
+
+    /// Refreshes an existing text view after the document changed in place.
+    fn refresh_text_view(&mut self) {
+        match &self.text {
+            Some(TextHandle::Large(view)) => {
+                view.refresh_scroll();
+                view.invalidate();
+            }
+            Some(TextHandle::Scintilla(control)) => {
+                let text = self.session.read(|doc| doc.decoded_text()).flatten();
+                if let Some(text) = text {
+                    control.set_text(&text);
+                    // Replacing the buffer marks the control modified; the
+                    // reload just confirmed it matches the file again.
+                    control.mark_saved();
+                }
+            }
+            None => {}
+        }
     }
 
     fn is_dirty(&self) -> bool {
@@ -2296,22 +3221,41 @@ impl App {
         doc_dirty || buffer_dirty
     }
 
-    fn confirm_discard(&mut self) -> Option<bool> {
-        if !self.session.has_document() {
-            return Some(true);
+    /// Prompts to save unsaved changes before the document is replaced.
+    ///
+    /// Returns `true` when the caller may continue: nothing was dirty, the
+    /// save succeeded, or the user chose to discard.  `false` means the user
+    /// cancelled or the save failed, so the requested operation must be
+    /// abandoned and the current document kept as-is.
+    fn confirm_transition(&mut self) -> bool {
+        if !self.session.has_document() || !self.is_dirty() {
+            return true;
         }
-        if !self.is_dirty() {
-            return Some(true);
-        }
+        let name = self
+            .session
+            .read(|doc| {
+                doc.path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .flatten()
+            .unwrap_or_else(|| "Untitled".to_owned());
+        let message = format!("Save changes to {name}?");
         let answer = unsafe {
             MessageBoxW(
                 Some(self.hwnd),
-                PCWSTR(to_wide("Discard unsaved changes?").as_ptr()),
+                PCWSTR(to_wide(&message).as_ptr()),
                 PCWSTR(to_wide("RNotepad").as_ptr()),
-                MB_YESNO | MB_ICONINFORMATION,
+                MB_YESNOCANCEL | MB_ICONWARNING,
             )
         };
-        Some(answer == IDYES)
+        match answer {
+            IDYES => matches!(self.save(None), SaveOutcome::Saved),
+            IDNO => true,
+            // Cancel keeps the document untouched and aborts the transition.
+            _ => false,
+        }
     }
 
     fn caret_state(&self) -> (Option<(u32, u32)>, Option<u64>, Option<u64>) {
@@ -2392,17 +3336,22 @@ impl App {
             doc: &guard,
             view,
             dirty,
+            editing: self.editing,
             position,
             selection_bytes: selection,
             offset,
             progress,
         };
         let mut fields = statusbar::fields(&info);
-        if self.session.results.is_stale() || !self.session.results.is_complete() {
-            if !self.session.results.is_empty() {
-                let count = self.session.results.len();
-                fields[statusbar::FIELD_PROGRESS] = format!("{count} results");
-            }
+        let results = &self.session.results;
+        if !results.is_empty() && (results.is_stale() || !results.is_complete()) {
+            let count = results.len();
+            let label = if results.is_stale() {
+                format!("{count} results (stale)")
+            } else {
+                format!("{count} results")
+            };
+            fields[statusbar::FIELD_PROGRESS] = label;
         }
         fields
     }
@@ -2417,6 +3366,10 @@ impl App {
             return;
         }
         let has_doc = self.session.has_document();
+        let has_path = self
+            .session
+            .read(|doc| doc.path.is_some())
+            .unwrap_or(false);
         let (editable, text_available) = self
             .session
             .read(|doc| (doc.kind.is_editable(), doc.text_available))
@@ -2433,6 +3386,7 @@ impl App {
 
         set(ID_FILE_SAVE, editable);
         set(ID_FILE_SAVE_AS, editable);
+        set(ID_FILE_RELOAD, has_path);
         set(ID_FILE_CLOSE, has_doc);
         set(ID_EDIT_UNDO, scintilla);
         set(ID_EDIT_REDO, scintilla);
@@ -2474,10 +3428,40 @@ impl App {
             } else {
                 MF_UNCHECKED
             };
+        let logging_flags = MF_BYCOMMAND
+            | if crate::logging_enabled() {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let editing_flags = MF_BYCOMMAND
+            | if self.editing {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        // Selecting the encoding and EOL menus marks the option in effect,
+        // so the user does not have to infer it from the status bar.
+        let (current_charset, current_eol) = self
+            .session
+            .read(|doc| (doc.encoding.charset, doc.eol.dominant))
+            .unwrap_or((Charset::Utf8, EolKind::CrLf));
         // SAFETY: live menu owned by this window.
         unsafe {
             let _ = CheckMenuItem(menu, ID_VIEW_FOLLOW_TAIL, follow_flags.0);
             let _ = CheckMenuItem(menu, ID_VIEW_RESULTS_FLOAT, float_flags.0);
+            let _ = CheckMenuItem(menu, ID_HELP_ENABLE_LOG, logging_flags.0);
+            let _ = CheckMenuItem(menu, ID_EDIT_TOGGLE, editing_flags.0);
+            for (id, _) in CHARSET_MENU_ITEMS {
+                let checked = has_doc && charset_for(id) == Some(current_charset);
+                let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = CheckMenuItem(menu, id, flags.0);
+            }
+            for (id, kind, _) in EOL_MENU_ITEMS {
+                let checked = has_doc && kind == current_eol;
+                let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = CheckMenuItem(menu, id, flags.0);
+            }
         }
     }
 
@@ -2508,15 +3492,49 @@ impl App {
             if !hdc.is_invalid() {
                 let mut client = RECT::default();
                 if GetClientRect(self.hwnd, &mut client).is_ok() {
+                    let find_height = self.find_bar_height();
                     let body = RECT {
                         left: 0,
                         top: 0,
                         right: client.right,
-                        bottom: (client.bottom - self.status_height()).max(0),
+                        bottom: (client.bottom - self.status_height() - find_height).max(0),
                     };
                     let body_brush = CreateSolidBrush(BODY_BACKGROUND);
                     FillRect(hdc, &body, body_brush);
                     let _ = DeleteObject(HGDIOBJ(body_brush.0));
+
+                    // The divider sits in the gap the panes leave for it.
+                    let divider = if self.session.has_document() {
+                        let half = SPLIT_GAP / 2;
+                        match self.session.layout {
+                            ViewLayout::TextAndHex => {
+                                let split = self.split_x(client.right);
+                                Some(RECT {
+                                    left: split - half,
+                                    top: body.top,
+                                    right: split + half,
+                                    bottom: body.bottom,
+                                })
+                            }
+                            ViewLayout::TextAndResults if self.float_frame.is_none() => {
+                                let split = self.results_split_y(body.bottom);
+                                Some(RECT {
+                                    left: body.left,
+                                    top: split - half,
+                                    right: body.right,
+                                    bottom: split + half,
+                                })
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(divider) = divider {
+                        let split_brush = CreateSolidBrush(SPLITTER_COLOR);
+                        FillRect(hdc, &divider, split_brush);
+                        let _ = DeleteObject(HGDIOBJ(split_brush.0));
+                    }
 
                     let find_brush = CreateSolidBrush(FIND_BAR_BACKGROUND);
                     if let Some(bar) = self.find.as_ref() {
@@ -2545,8 +3563,11 @@ impl App {
                     self.open_document(path);
                 }
             }
-            ID_FILE_SAVE => self.save(None),
+            ID_FILE_SAVE => {
+                self.save(None);
+            }
             ID_FILE_SAVE_AS => self.save_as(),
+            ID_FILE_RELOAD => self.reload_from_disk(),
             ID_FILE_CLOSE => self.close_document(),
             ID_FILE_EXIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -2554,10 +3575,11 @@ impl App {
             ID_EDIT_UNDO => self.edit_command(rnotepad_win::sci_consts::SCI_UNDO),
             ID_EDIT_REDO => self.edit_command(rnotepad_win::sci_consts::SCI_REDO),
             ID_EDIT_CUT => self.edit_command(WM_CUT),
-            ID_EDIT_COPY => self.edit_command(WM_COPY),
+            ID_EDIT_COPY => self.copy_selection(),
             ID_EDIT_PASTE => self.edit_command(WM_PASTE),
             ID_EDIT_TOGGLE => self.toggle_editing(),
-            ID_EDIT_FIND => self.toggle_find_bar(true),
+            ID_EDIT_FIND => self.open_find(),
+            ID_EDIT_REPLACE => self.open_replace(),
             ID_EDIT_FIND_NEXT => self.find_next(),
             ID_EDIT_FIND_ALL => self.start_find_all(),
             ID_VIEW_TEXT => self.set_layout(ViewLayout::Text),
@@ -2566,6 +3588,7 @@ impl App {
             ID_VIEW_RESULTS => self.set_layout(ViewLayout::TextAndResults),
             ID_VIEW_FOLLOW_TAIL => self.toggle_follow_tail(),
             ID_VIEW_RESULTS_FLOAT => self.toggle_results_float(),
+            ID_HELP_ENABLE_LOG => self.toggle_logging(),
             ID_EOL_LF => self.set_eol(EolKind::Lf),
             ID_EOL_CRLF => self.set_eol(EolKind::CrLf),
             ID_EOL_CR => self.set_eol(EolKind::Cr),
@@ -2586,11 +3609,14 @@ impl App {
             }
             ID_FIND_NEXT_BUTTON => self.find_next(),
             ID_FIND_ALL_BUTTON => self.start_find_all(),
+            ID_FIND_REPLACE_ONE => self.replace_one(),
             ID_FIND_REPLACE_BUTTON => self.replace_all(),
             ID_FIND_CLOSE => self.toggle_find_bar(false),
             ID_FIND_CANCEL => self.cancel_search_from_ui(),
             other => {
-                if let Some(charset) = charset_for(other) {
+                if (ID_FILE_RECENT_FIRST..=ID_FILE_RECENT_LAST).contains(&other) {
+                    self.open_recent(other);
+                } else if let Some(charset) = charset_for(other) {
                     self.reinterpret(charset);
                 } else if let Some(charset) = convert_charset_for(other) {
                     self.convert_to(charset);
@@ -2600,6 +3626,18 @@ impl App {
     }
 
     fn edit_command(&mut self, message: u32) {
+        // Cut and paste must act on the control that owns focus; the find
+        // fields are ordinary edit controls.  Scintilla-only messages such as
+        // undo and redo keep going to the editor.
+        if matches!(message, WM_CUT | WM_PASTE) {
+            if let Some(edit) = self.focused_find_edit() {
+                // SAFETY: the edit control is alive and handles these messages.
+                unsafe {
+                    let _ = SendMessageW(edit, message, None, None);
+                }
+                return;
+            }
+        }
         if let Some(TextHandle::Scintilla(control)) = &self.text {
             control.send(message, 0, 0);
         }
@@ -2617,29 +3655,31 @@ impl App {
             _ => None,
         };
         if let Some(scintilla) = scintilla {
-            if header.hwndFrom == scintilla && header.code == SCN_UPDATEUI_CODE {
-                self.sync_hex_from_text();
-                return;
-            }
-        }
-        if header.code == NM_DBLCLK {
-            // A double click on an actionable status field opens its menu.
-            if let Some(status) = self.status {
-                if header.hwndFrom == status {
-                    // SAFETY: status bars send NM_DBLCLK with an NMMOUSE
-                    // structure whose `dwItemSpec` is the partition index.
-                    let info = lparam.0 as *const NMMOUSE;
-                    if !info.is_null() {
-                        match unsafe { (*info).dwItemSpec } {
-                            statusbar::FIELD_ENCODING => self.open_encoding_menu(),
-                            statusbar::FIELD_EOL => self.open_eol_menu(),
-                            _ => {}
+            if header.hwndFrom == scintilla {
+                match header.code {
+                    SCN_CHARADDED_CODE => {
+                        // Keep the indentation of the line above when the user
+                        // presses Enter, matching config-file editing habits.
+                        if self.editing && is_newline_char_added(lparam.0) {
+                            if let Some(TextHandle::Scintilla(control)) = &self.text {
+                                control.apply_previous_indent();
+                            }
                         }
+                        return;
                     }
-                    return;
+                    SCN_UPDATEUI_CODE => {
+                        self.sync_hex_from_text();
+                        return;
+                    }
+                    SCN_ZOOM_CODE => {
+                        self.apply_text_zoom();
+                        return;
+                    }
+                    _ => {}
                 }
             }
-        } else if header.code == LVN_GETDISPINFOW {
+        }
+        if header.code == LVN_GETDISPINFOW {
             // SAFETY: the control sent LVN_GETDISPINFOW, which carries an
             // NMLVDISPINFOW structure.
             let info = lparam.0 as *mut NMLVDISPINFOW;
@@ -2648,20 +3688,17 @@ impl App {
             }
             let index = unsafe { (*info).item.iItem };
             let sub = unsafe { (*info).item.iSubItem };
+            let row_index = usize::try_from(index).unwrap_or(usize::MAX);
             let text = match self.results_mode {
-                ResultsMode::Hits => self
-                    .session
-                    .results
-                    .row(usize::try_from(index).unwrap_or(usize::MAX))
-                    .map(|row| match sub {
-                        0 => format!("{}", row.line),
-                        1 => format!("{}", row.column),
-                        _ => format!("0x{:08X}", row.offset),
-                    })
-                    .unwrap_or_default(),
+                ResultsMode::Hits => match self.session.results.row(row_index) {
+                    Some(row) if sub == 0 => format!("{}", row.line),
+                    Some(row) if sub == 1 => format!("{}", row.column),
+                    Some(_) => self.hit_preview_text(row_index),
+                    None => String::new(),
+                },
                 ResultsMode::Problems => self
                     .problems
-                    .get(usize::try_from(index).unwrap_or(usize::MAX))
+                    .get(row_index)
                     .map(|problem| match sub {
                         0 => format!("{}", problem.line_col.0),
                         1 => format!("{}", problem.line_col.1),
@@ -2690,7 +3727,9 @@ impl App {
                     ResultsMode::Hits => {
                         self.hit_cursor = index.saturating_add(1);
                         if let Some(hit) = self.session.results.hit(index).copied() {
-                            self.navigate_to(&hit);
+                            // A double-click lands the caret on the hit itself
+                            // so editing can start at the exact column.
+                            self.navigate_to(&hit, false);
                         }
                     }
                     ResultsMode::Problems => {
@@ -2729,6 +3768,8 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
         }
+        // Flush buffered records before the process exits.
+        crate::shutdown_logging();
         self.watcher = None;
         self.text = None;
         self.text_data = None;
@@ -2744,6 +3785,11 @@ impl App {
         if let Some(list) = self.results_list.take() {
             unsafe {
                 let _ = DestroyWindow(list);
+            }
+        }
+        if let Some(tip) = self.results_tip.take() {
+            unsafe {
+                let _ = DestroyWindow(tip);
             }
         }
         if let Some(font) = self.status_font.take() {
@@ -2793,6 +3839,14 @@ fn charset_for(id: u32) -> Option<Charset> {
         ID_ENC_WINDOWS_1252 => Some(Charset::Windows1252),
         ID_ENC_LATIN1 => Some(Charset::Latin1),
         _ => None,
+    }
+}
+
+fn text_matches(selected: &str, pattern: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        selected == pattern
+    } else {
+        selected.eq_ignore_ascii_case(pattern)
     }
 }
 
@@ -2861,6 +3915,104 @@ fn create_child(
     .map_err(|err| err.to_string())
 }
 
+/// Builds the preview shown in the Text column for one search hit.
+///
+/// The matched text stays inside the preview and the whole preview is capped
+/// at [`RESULT_PREVIEW_CHARS`] characters, so a long line cannot push the
+/// match out of the cell.  Only bytes around the hit are read, keeping
+/// owner-data painting cheap even for very long lines.
+fn line_preview(document: &Document, hit: &MatchHit) -> String {
+    if document.id != hit.doc_id {
+        return String::new();
+    }
+    let Some(line_range) = document.line_index.line_range(hit.line_no) else {
+        return String::new();
+    };
+    let match_start = hit.raw_offset;
+    if match_start < line_range.start || match_start > line_range.end {
+        return String::new();
+    }
+    let match_end = match_start
+        .saturating_add(u64::from(hit.match_len))
+        .min(line_range.end);
+    let prefix_start = document
+        .coord
+        .char_boundary(RawByteOffset(
+            match_start.saturating_sub(RESULT_PREVIEW_PREFIX_BYTES),
+        ))
+        .0
+        .max(line_range.start);
+    let suffix_end = match_end
+        .saturating_add(RESULT_PREVIEW_SUFFIX_BYTES)
+        .min(line_range.end);
+
+    let prefix = decode_span(document, prefix_start..match_start);
+    let mut body = decode_span(document, match_start..suffix_end);
+    if suffix_end < line_range.end {
+        // A bounded window may end inside a character; drop the artifact.
+        let len = body.trim_end_matches('\u{FFFD}').len();
+        body.truncate(len);
+    }
+    let body = body.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+
+    let prefix_chars = prefix.chars().count();
+    let lead_chars = prefix_chars.min(RESULT_PREVIEW_LEAD_CHARS);
+    let lead: String = prefix
+        .chars()
+        .skip(prefix_chars.saturating_sub(lead_chars))
+        .collect();
+    let available = RESULT_PREVIEW_CHARS.saturating_sub(lead_chars);
+    let body_chars = body.chars().count();
+    let taken: String = body.chars().take(available).collect();
+
+    let mut preview = String::new();
+    if prefix_start > line_range.start || prefix_chars > lead_chars {
+        preview.push(RESULT_PREVIEW_ELLIPSIS);
+    }
+    preview.push_str(&lead);
+    preview.push_str(&taken);
+    if body_chars > available || suffix_end < line_range.end {
+        preview.push(RESULT_PREVIEW_ELLIPSIS);
+    }
+    preview
+}
+
+/// Decodes a raw byte span with the document charset.
+fn decode_span(document: &Document, range: std::ops::Range<u64>) -> String {
+    document
+        .raw
+        .slice(range)
+        .map(|bytes| decode(bytes, document.encoding.charset, 0).text)
+        .unwrap_or_default()
+}
+
+/// Queues at most one results repaint when a display request is dropped.
+///
+/// Owner-data list views ask for cell text synchronously while painting.  A
+/// paint started from inside [`with_app`] (tooltip tracking, focus changes on
+/// navigation) is re-entrant, so the request is discarded and the control
+/// keeps the blank cell.  Re-posting a paint request once per cycle lets the
+/// list ask again outside the guard and restore the text.
+fn request_results_repaint(hwnd: HWND, lparam: LPARAM) {
+    let header = lparam.0 as *const NMHDR;
+    if header.is_null() {
+        return;
+    }
+    // SAFETY: the sender passes a live NMHDR for the duration of the message.
+    if unsafe { (*header).code } != LVN_GETDISPINFOW {
+        return;
+    }
+    if REPAINT_POSTED.with(Cell::get) {
+        return;
+    }
+    REPAINT_POSTED.with(|flag| flag.set(true));
+    // SAFETY: posting to the live top-level window satisfies the message loop.
+    if unsafe { PostMessageW(Some(hwnd), WM_APP_RESULTS_REPAINT, WPARAM(0), LPARAM(0)) }.is_err() {
+        // A failed post must not keep the flag latched.
+        REPAINT_POSTED.with(|flag| flag.set(false));
+    }
+}
+
 fn show_window(hwnd: HWND, visible: bool) {
     unsafe {
         let _ = ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE });
@@ -2879,6 +4031,7 @@ fn show_bar(bar: &FindBar, visible: bool) {
         bar.replace,
         bar.next,
         bar.all,
+        bar.replace_one,
         bar.replace_all,
         bar.case,
         bar.close,
@@ -2929,8 +4082,16 @@ fn write_clipboard(text: &str) -> Result<(), String> {
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer as *mut u16, wide.len());
         let _ = GlobalUnlock(handle);
-        OpenClipboard(None).map_err(|err| err.to_string())?;
-        EmptyClipboard().map_err(|err| err.to_string())?;
+        if let Err(err) = OpenClipboard(None) {
+            // Ownership never transferred, so the block must be released.
+            let _ = GlobalFree(Some(handle));
+            return Err(err.to_string());
+        }
+        if let Err(err) = EmptyClipboard() {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(handle));
+            return Err(err.to_string());
+        }
         let copied = SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(handle.0)));
         let _ = CloseClipboard();
         if copied.is_err() {
@@ -3027,15 +4188,29 @@ fn register_class(instance: HINSTANCE, icons: Option<&WindowIcons>) -> Result<()
     Ok(())
 }
 
-fn build_menu() -> Result<HMENU, String> {
+fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
     // SAFETY: menu handles are created and owned by this window.
     unsafe {
         let menu = CreateMenu().map_err(|err| err.to_string())?;
         let file = CreatePopupMenu().map_err(|err| err.to_string())?;
         append(file, MF_STRING, ID_FILE_NEW, "New\tCtrl+N");
         append(file, MF_STRING, ID_FILE_OPEN, "Open...\tCtrl+O");
+        append(file, MF_SEPARATOR, 0, "");
+        let recent_menu = CreatePopupMenu().map_err(|err| err.to_string())?;
+        if recent.paths().is_empty() {
+            append(recent_menu, MF_STRING | MF_GRAYED, 0, "(no recent files)");
+        } else {
+            for (index, path) in recent.paths().iter().take(RECENT_LIMIT).enumerate() {
+                let label = format!("{}. {}", index + 1, path.display());
+                let id = ID_FILE_RECENT_FIRST + index as u32;
+                append(recent_menu, MF_STRING, id, &label);
+            }
+        }
+        menu_popup(file, recent_menu, "Recent Files");
+        append(file, MF_SEPARATOR, 0, "");
         append(file, MF_STRING, ID_FILE_SAVE, "Save\tCtrl+S");
         append(file, MF_STRING, ID_FILE_SAVE_AS, "Save As...");
+        append(file, MF_STRING, ID_FILE_RELOAD, "Reload\tCtrl+R");
         append(file, MF_SEPARATOR, 0, "");
         append(file, MF_STRING, ID_FILE_CLOSE, "Close");
         append(file, MF_SEPARATOR, 0, "");
@@ -3053,6 +4228,7 @@ fn build_menu() -> Result<HMENU, String> {
         append(edit, MF_STRING, ID_EDIT_TOGGLE, "Enable Editing");
         append(edit, MF_SEPARATOR, 0, "");
         append(edit, MF_STRING, ID_EDIT_FIND, "Find\tCtrl+F");
+        append(edit, MF_STRING, ID_EDIT_REPLACE, "Replace\tCtrl+H");
         append(edit, MF_STRING, ID_EDIT_FIND_NEXT, "Find Next\tF3");
         append(edit, MF_STRING, ID_EDIT_FIND_ALL, "Find All");
         append(edit, MF_STRING, ID_FIND_CANCEL, "Cancel Search");
@@ -3069,15 +4245,9 @@ fn build_menu() -> Result<HMENU, String> {
         menu_popup(menu, view, "View");
 
         let encoding = CreatePopupMenu().map_err(|err| err.to_string())?;
-        append(encoding, MF_STRING, ID_ENC_UTF8, "UTF-8");
-        append(encoding, MF_STRING, ID_ENC_UTF16LE, "UTF-16 LE");
-        append(encoding, MF_STRING, ID_ENC_UTF16BE, "UTF-16 BE");
-        append(encoding, MF_STRING, ID_ENC_GBK, "GBK");
-        append(encoding, MF_STRING, ID_ENC_GB18030, "GB18030");
-        append(encoding, MF_STRING, ID_ENC_BIG5, "Big5");
-        append(encoding, MF_STRING, ID_ENC_SHIFT_JIS, "Shift-JIS");
-        append(encoding, MF_STRING, ID_ENC_WINDOWS_1252, "Windows-1252");
-        append(encoding, MF_STRING, ID_ENC_LATIN1, "Latin-1");
+        for (id, label) in CHARSET_MENU_ITEMS {
+            append(encoding, MF_STRING, id, label);
+        }
         append(encoding, MF_SEPARATOR, 0, "");
         append(encoding, MF_STRING, ID_BOM_KEEP, "Keep BOM");
         append(encoding, MF_STRING, ID_BOM_ADD, "Add BOM");
@@ -3085,9 +4255,9 @@ fn build_menu() -> Result<HMENU, String> {
         menu_popup(menu, encoding, "Encoding");
 
         let eol = CreatePopupMenu().map_err(|err| err.to_string())?;
-        append(eol, MF_STRING, ID_EOL_CRLF, "CRLF");
-        append(eol, MF_STRING, ID_EOL_LF, "LF");
-        append(eol, MF_STRING, ID_EOL_CR, "CR");
+        for (id, _, label) in EOL_MENU_ITEMS {
+            append(eol, MF_STRING, id, label);
+        }
         menu_popup(menu, eol, "EOL");
 
         let format = CreatePopupMenu().map_err(|err| err.to_string())?;
@@ -3097,6 +4267,8 @@ fn build_menu() -> Result<HMENU, String> {
         menu_popup(menu, format, "Format");
 
         let help = CreatePopupMenu().map_err(|err| err.to_string())?;
+        append(help, MF_STRING, ID_HELP_ENABLE_LOG, "Enable Logging");
+        append(help, MF_SEPARATOR, 0, "");
         append(help, MF_STRING, ID_HELP_ABOUT, "About RNotepad");
         menu_popup(menu, help, "Help");
         Ok(menu)
@@ -3142,10 +4314,22 @@ fn pick_file(hwnd: HWND, save: bool, initial: Option<&Path>) -> Option<PathBuf> 
     }
     let filter = to_wide(FILE_FILTER);
     let title = to_wide(if save { SAVE_TITLE } else { OPEN_TITLE });
+    // Save As appends this extension when the typed name has none, reusing the
+    // extension of the file being edited whenever possible.
+    let default_ext = to_wide(if save {
+        initial
+            .and_then(Path::extension)
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(SAVE_DEFAULT_EXTENSION)
+    } else {
+        ""
+    });
     let directory = initial
         .and_then(Path::parent)
         .map(|path| to_wide(&path.to_string_lossy()));
-    let mut flags = OFN_EXPLORER | OFN_PATHMUSTEXIST;
+    // OFN_NOCHANGEDIR keeps the process working directory stable, which
+    // matters for relative paths used elsewhere in the process.
+    let mut flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     flags = if save {
         flags | OFN_OVERWRITEPROMPT
     } else {
@@ -3161,6 +4345,11 @@ fn pick_file(hwnd: HWND, save: bool, initial: Option<&Path>) -> Option<PathBuf> 
             .as_ref()
             .map_or(PCWSTR::null(), |wide| PCWSTR(wide.as_ptr())),
         lpstrTitle: PCWSTR(title.as_ptr()),
+        lpstrDefExt: if save {
+            PCWSTR(default_ext.as_ptr())
+        } else {
+            PCWSTR::null()
+        },
         Flags: flags,
         ..Default::default()
     };
@@ -3184,25 +4373,69 @@ fn pick_file(hwnd: HWND, save: bool, initial: Option<&Path>) -> Option<PathBuf> 
     Some(PathBuf::from(OsString::from_wide(&buffer[..end])))
 }
 
+unsafe extern "system" fn results_list_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass: usize,
+    refdata: usize,
+) -> LRESULT {
+    // `refdata` carries the owning top-level window because reparenting the
+    // list into the floating frame changes its parent.
+    let owner = HWND(refdata as *mut core::ffi::c_void);
+    match message {
+        WM_MOUSEMOVE => {
+            with_app(owner, |app| {
+                app.update_results_tip(hwnd, lparam_x(lparam), lparam_y(lparam));
+            });
+        }
+        WM_MOUSELEAVE => {
+            with_app(owner, |app| {
+                app.tip_tracking = false;
+                app.hide_results_tip(hwnd);
+            });
+        }
+        // Any click, wheel scroll or key press invalidates the hovered row.
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL | WM_VSCROLL | WM_KEYDOWN => {
+            with_app(owner, |app| app.hide_results_tip(hwnd));
+        }
+        _ => {}
+    }
+    // SAFETY: forwarding to the original list-view procedure.
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
 unsafe extern "system" fn find_edit_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
     _subclass: usize,
-    _refdata: usize,
+    refdata: usize,
 ) -> LRESULT {
-    if message == WM_KEYDOWN && wparam.0 as u32 == VK_RETURN.0 as u32 {
-        if let Ok(parent) = unsafe { GetParent(hwnd) } {
-            unsafe {
-                let _ = PostMessageW(
-                    Some(parent),
-                    WM_COMMAND,
-                    WPARAM(ID_FIND_NEXT_BUTTON as usize),
-                    LPARAM(0),
-                );
+    if message == WM_KEYDOWN {
+        let key = wparam.0 as u32;
+        // `refdata` carries the command Enter should run for this field.
+        let command = if key == VK_RETURN.0 as u32 {
+            Some(refdata)
+        } else if key == VK_ESCAPE.0 as u32 {
+            Some(ID_FIND_CLOSE as usize)
+        } else {
+            None
+        };
+        if let Some(command) = command {
+            if let Ok(parent) = unsafe { GetParent(hwnd) } {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(parent),
+                        WM_COMMAND,
+                        WPARAM(command),
+                        LPARAM(0),
+                    );
+                }
+                return LRESULT(0);
             }
-            return LRESULT(0);
         }
     }
     // SAFETY: forwarding to the original window procedure.
@@ -3244,16 +4477,66 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             with_app(hwnd, |app| app.paint());
             LRESULT(0)
         }
-        WM_TIMER => {
-            with_app(hwnd, |app| {
-                app.poll_job();
-                app.poll_watcher();
-                app.update_status();
+        WM_SETCURSOR => {
+            let hit_test = (lparam.0 & 0xFFFF) as u32;
+            let resizing = with_app_result(hwnd, |app| app.splitter_cursor());
+            if hit_test == HTCLIENT && resizing == Some(true) {
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
+        WM_LBUTTONDOWN => {
+            let handled = with_app_result(hwnd, |app| {
+                app.begin_split_drag(lparam_x(lparam), lparam_y(lparam))
             });
+            if handled == Some(true) {
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
+        WM_MOUSEMOVE => {
+            let handled = with_app_result(hwnd, |app| {
+                app.drag_split(lparam_x(lparam), lparam_y(lparam))
+            });
+            if handled == Some(true) {
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
+        WM_LBUTTONUP => {
+            let handled = with_app_result(hwnd, |app| app.end_split_drag());
+            if handled == Some(true) {
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
+        WM_CAPTURECHANGED => {
+            with_app(hwnd, |app| app.split_axis = None);
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if wparam.0 == TIMER_TIP {
+                with_app(hwnd, App::show_pending_tip);
+            } else {
+                with_app(hwnd, |app| {
+                    app.poll_job();
+                    app.poll_watcher();
+                    app.update_status();
+                });
+            }
             LRESULT(0)
         }
         WM_APP_FLOAT_RESIZE => {
             with_app(hwnd, App::resize_float_results);
+            LRESULT(0)
+        }
+        WM_APP_RESULTS_REPAINT => {
+            REPAINT_POSTED.with(|flag| flag.set(false));
+            with_app(hwnd, App::repaint_results);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -3262,6 +4545,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_NOTIFY => {
+            if IN_APP.with(Cell::get) {
+                request_results_repaint(hwnd, lparam);
+            }
             let code = lparam;
             with_app(hwnd, |app| app.on_notify(code));
             LRESULT(0)
@@ -3287,8 +4573,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_CLOSE => {
-            let proceed = with_app_result(hwnd, |app| app.confirm_discard());
-            if matches!(proceed, Some(Some(true))) {
+            let proceed = with_app_result(hwnd, |app| app.confirm_transition());
+            if matches!(proceed, Some(true)) {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -3327,6 +4613,21 @@ unsafe fn dropped_path(hdrop: HDROP) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_wide(&buffer)))
 }
 
+/// Signed x coordinate of a client-area mouse message.
+fn lparam_x(lparam: LPARAM) -> i32 {
+    (lparam.0 & 0xFFFF) as i16 as i32
+}
+
+/// Signed y coordinate of a client-area mouse message.
+fn lparam_y(lparam: LPARAM) -> i32 {
+    ((lparam.0 >> 16) & 0xFFFF) as i16 as i32
+}
+
+/// Scales a value expressed at [`BASE_DPI`] to the window's DPI.
+fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
+    (value * dpi as i32 + BASE_DPI / 2) / BASE_DPI
+}
+
 fn with_app_result<R>(hwnd: HWND, visit: impl FnOnce(&mut App) -> R) -> Option<R> {
     if IN_APP.with(Cell::get) {
         return None;
@@ -3354,7 +4655,7 @@ pub fn run() -> Result<(), String> {
     unsafe {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_WIN95_CLASSES,
         };
         let _ = InitCommonControlsEx(&controls);
     }
@@ -3373,9 +4674,11 @@ pub fn run() -> Result<(), String> {
     };
     register_class(HINSTANCE(instance.0), icons.as_ref())?;
     register_float_class(HINSTANCE(instance.0))?;
-    let menu = build_menu()?;
+    let recent = RecentFiles::load();
+    let menu = build_menu(&recent)?;
     let mut app = Box::<App>::default();
     app.icons = icons;
+    app.recent = recent;
     let app = Box::into_raw(app);
     // SAFETY: the pointer is handed to the window; WM_NCCREATE stores it and
     // WM_NCDESTROY reclaims it.
@@ -3384,7 +4687,7 @@ pub fn run() -> Result<(), String> {
             WS_EX_APPWINDOW | WS_EX_CLIENTEDGE,
             w!("RNotepadMainWindow"),
             w!("RNotepad"),
-            WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             WINDOW_WIDTH,
@@ -3419,6 +4722,8 @@ pub fn run() -> Result<(), String> {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
     }
+    // The window owns focus right after being shown, so hand it to the editor.
+    with_app(hwnd, |app| app.focus_active_view());
     let accelerators = unsafe { CreateAcceleratorTableW(&ACCELERATORS) }
         .map_err(|err| err.to_string())?;
     let mut message = MSG::default();

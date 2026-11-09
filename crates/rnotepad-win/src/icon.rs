@@ -320,7 +320,7 @@ fn create_icon(pixels: &[u8], edge: u32) -> WinResult<HICON> {
         biPlanes: 1,
         biBitCount: 32,
         biCompression: BI_RGB.0,
-        biSizeImage: (edge * edge) as u32 * BYTES_PER_PIXEL as u32,
+        biSizeImage: edge * edge * BYTES_PER_PIXEL as u32,
         ..Default::default()
     };
     let info = BITMAPINFO {

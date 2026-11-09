@@ -11,6 +11,8 @@ pub const ID_FILE_OPEN: u32 = 1001;
 pub const ID_FILE_SAVE: u32 = 1002;
 /// Save the current document under a new path.
 pub const ID_FILE_SAVE_AS: u32 = 1003;
+/// Reload the current document from disk.
+pub const ID_FILE_RELOAD: u32 = 1005;
 /// Close the current document.
 pub const ID_FILE_CLOSE: u32 = 1004;
 /// Exit the application.
@@ -30,6 +32,8 @@ pub const ID_EDIT_PASTE: u32 = 1105;
 pub const ID_EDIT_TOGGLE: u32 = 1106;
 /// Show the find bar.
 pub const ID_EDIT_FIND: u32 = 1107;
+/// Show the find bar with the focus on the replacement field.
+pub const ID_EDIT_REPLACE: u32 = 1110;
 /// Find the next match (F3).
 pub const ID_EDIT_FIND_NEXT: u32 = 1108;
 /// Find every match.
@@ -111,6 +115,13 @@ pub const ID_FORMAT_DIAGNOSTIC: u32 = 1603;
 
 /// Show the about box.
 pub const ID_HELP_ABOUT: u32 = 1701;
+/// Enable or disable file logging.
+pub const ID_HELP_ENABLE_LOG: u32 = 1702;
+
+/// First command id reserved for recent-file entries.
+pub const ID_FILE_RECENT_FIRST: u32 = 1901;
+/// Last command id reserved for recent-file entries.
+pub const ID_FILE_RECENT_LAST: u32 = 1910;
 
 /// Find text editor.
 pub const ID_FIND_EDIT: u32 = 2001;
@@ -128,6 +139,8 @@ pub const ID_FIND_REPLACE_BUTTON: u32 = 2006;
 pub const ID_FIND_REPLACE_EDIT: u32 = 2007;
 /// Cancels the running background search.
 pub const ID_FIND_CANCEL: u32 = 2008;
+/// Replaces the current match.
+pub const ID_FIND_REPLACE_ONE: u32 = 2009;
 
 /// Height of the status strip.
 pub const STATUS_HEIGHT: i32 = 24;
@@ -137,14 +150,14 @@ pub const FIND_BAR_HEIGHT: i32 = 64;
 pub const FIND_ROW_HEIGHT: i32 = 26;
 /// Gap between find-bar rows.
 pub const FIND_ROW_GAP: i32 = 4;
-/// Width of the results panel.
-pub const RESULTS_WIDTH: i32 = 380;
 /// Gap between split panes.
 pub const SPLIT_GAP: i32 = 4;
 /// Timer used for status refresh and background task polling.
 pub const TIMER_REFRESH: usize = 1;
 /// Refresh interval in milliseconds.
 pub const TIMER_INTERVAL_MS: u32 = 250;
+/// One-shot timer that reveals the results hover tip once the pointer rests.
+pub const TIMER_TIP: usize = 2;
 /// Ratio of the text pane in split layouts.
 pub const TEXT_SPLIT_RATIO: f32 = 0.62;
 /// Number of status fields.
@@ -153,6 +166,12 @@ pub const STATUS_FIELD_COUNT: usize = 8;
 pub const HEX_BYTES_PER_ROW: u64 = 16;
 /// Width of the find-bar cancel button.
 pub const FIND_CANCEL_WIDTH: i32 = 64;
+/// Width of a regular find-bar action button.
+pub const FIND_BUTTON_WIDTH: i32 = 80;
+/// Width of the case-sensitive checkbox.
+pub const FIND_CASE_WIDTH: i32 = 56;
+/// Width of the find-bar close button.
+pub const FIND_CLOSE_WIDTH: i32 = 28;
 /// Default size of the floating results frame.
 pub const FLOAT_FRAME_WIDTH: i32 = 480;
 /// Default height of the floating results frame.

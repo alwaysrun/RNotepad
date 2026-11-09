@@ -36,7 +36,6 @@ const MAX_REPLACEMENT_RATIO: f64 = 0.05;
 /// Upper bound for non-whitespace control characters.
 const MAX_CONTROL_RATIO: f64 = 0.05;
 const REPLACEMENT_CHAR: char = '\u{FFFD}';
-const LOG_EXTENSIONS: [&str; 4] = ["log", "out", "trace", "dmp"];
 
 /// How the document may be written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +151,7 @@ impl Document {
         }
         let size = metadata.len();
         let opened_mtime = metadata.modified().ok();
-        let is_log = has_log_extension(&path);
-        let force_large = options.force_large || is_log || size > options.editable_limit;
+        let force_large = options.force_large || size > options.editable_limit;
 
         let raw = if force_large {
             let file = File::open(&path)?;
@@ -410,15 +408,6 @@ impl Document {
     }
 }
 
-fn has_log_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            let lower = ext.to_ascii_lowercase();
-            LOG_EXTENSIONS.contains(&lower.as_str())
-        })
-}
-
 fn text_is_plausible(text: &str, decode_errors: usize) -> bool {
     if text.is_empty() {
         return true;
@@ -471,11 +460,5 @@ mod tests {
         let doc = Document::from_bytes(3, b"\xEF\xBB\xBFhi".to_vec());
         assert_eq!(doc.encoding.bom, BomState::Utf8);
         assert_eq!(doc.raw.len(), 5);
-    }
-
-    #[test]
-    fn log_extension_forces_read_only() {
-        assert!(has_log_extension(Path::new("app.LOG")));
-        assert!(!has_log_extension(Path::new("notes.txt")));
     }
 }

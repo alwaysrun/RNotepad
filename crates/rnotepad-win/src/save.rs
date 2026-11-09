@@ -117,8 +117,6 @@ pub fn resolve_bom(policy: BomPolicy, current: BomState, charset: Charset) -> Bo
         BomPolicy::Keep => {
             if current.charset() == Some(charset) {
                 current
-            } else if charset == Charset::Utf8 {
-                BomState::None
             } else {
                 BomState::None
             }

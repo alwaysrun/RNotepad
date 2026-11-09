@@ -1,18 +1,18 @@
 //! Status bar field formatting.
 //!
-//! The formatting is pure so it can be unit-tested without a window.  The
-//! application maps each field to a status bar part and handles double clicks
-//! on the encoding and EOL fields.
+//! The status bar is a read-only display: all formatting is pure so it can be
+//! unit-tested without a window, and the application simply maps each field to
+//! a status bar part.
 
-use rnotepad_core::document::{Document, DocumentKind, ViewMode};
+use rnotepad_core::document::{Document, ViewMode};
 
 /// Number of status bar parts defined by the specification.
 pub const FIELD_COUNT: usize = 8;
 /// Index of the view-mode field.
 pub const FIELD_VIEW: usize = 0;
-/// Index of the encoding field (double click opens the encoding menu).
+/// Index of the encoding field.
 pub const FIELD_ENCODING: usize = 1;
-/// Index of the EOL field (double click opens the EOL menu).
+/// Index of the EOL field.
 pub const FIELD_EOL: usize = 2;
 /// Index of the size field.
 pub const FIELD_SIZE: usize = 3;
@@ -26,11 +26,11 @@ pub const FIELD_OFFSET: usize = 6;
 pub const FIELD_PROGRESS: usize = 7;
 
 const BOM_MARKER: &str = " · BOM";
-/// Marks a field that opens a menu on double click.
-const ACTION_MARKER: &str = " ▾";
 const FLAG_READ_ONLY: &str = "RO";
 const FLAG_EDITING: &str = "EDIT";
 const FLAG_DIRTY: &str = "*";
+const FLAG_BINARY: &str = "BINARY";
+const FLAG_LARGE: &str = "LARGE";
 const FLAG_STALE_HEX: &str = "磁盘版本（有未保存修改）";
 const MIXED_PREFIX: &str = "Mixed";
 const CONFIDENCE_THRESHOLD: f32 = 0.90;
@@ -45,6 +45,8 @@ pub struct StatusInfo<'a> {
     pub doc: &'a Document,
     pub view: ViewMode,
     pub dirty: bool,
+    /// `true` while the Scintilla buffer accepts user edits.
+    pub editing: bool,
     /// One-based line and column of the caret or selection anchor.
     pub position: Option<(u32, u32)>,
     /// Number of selected bytes, when the selection is not empty.
@@ -86,21 +88,19 @@ fn encoding_field(info: &StatusInfo<'_>) -> String {
     if info.doc.confidence < CONFIDENCE_THRESHOLD {
         text.push_str(&format!(
             " ({:.0}%)",
-            f32::from(info.doc.confidence) * PERCENT_BASE
+            info.doc.confidence * PERCENT_BASE
         ));
     }
-    text.push_str(ACTION_MARKER);
     text
 }
 
 fn eol_field(info: &StatusInfo<'_>) -> String {
     let eol = info.doc.eol;
-    let mut text = if eol.mixed {
+    let text = if eol.mixed {
         format!("{MIXED_PREFIX} {}:{}", eol.crlf, eol.lf)
     } else {
         eol.dominant.display_name().to_owned()
     };
-    text.push_str(ACTION_MARKER);
     text
 }
 
@@ -117,18 +117,26 @@ fn position_field(info: &StatusInfo<'_>) -> String {
 }
 
 fn flags_field(info: &StatusInfo<'_>) -> String {
-    let mut flags = String::new();
-    match info.doc.kind {
-        DocumentKind::LargeReadOnly => flags.push_str(FLAG_READ_ONLY),
-        DocumentKind::Editable => {
-            flags.push_str(FLAG_EDITING);
-            if info.dirty {
-                flags.push(' ');
-                flags.push_str(FLAG_DIRTY);
-            }
-        }
+    if !info.doc.kind.is_editable() {
+        // The reason is spelled out so a read-only document is unmistakable.
+        let reason = if info.doc.text_available {
+            FLAG_LARGE
+        } else {
+            FLAG_BINARY
+        };
+        return format!("{FLAG_READ_ONLY} · {reason}");
     }
-    if info.doc.kind.is_editable() && info.dirty && info.view == ViewMode::Hex {
+    let mut flags = String::new();
+    if info.editing {
+        flags.push_str(FLAG_EDITING);
+        if info.dirty {
+            flags.push(' ');
+            flags.push_str(FLAG_DIRTY);
+        }
+    } else {
+        flags.push_str(FLAG_READ_ONLY);
+    }
+    if info.editing && info.dirty && info.view == ViewMode::Hex {
         if !flags.is_empty() {
             flags.push_str(" · ");
         }
@@ -187,6 +195,7 @@ mod tests {
             doc: &doc,
             view: ViewMode::Text,
             dirty: false,
+            editing: true,
             position: Some((1, 5)),
             selection_bytes: None,
             offset: None,

@@ -6,7 +6,7 @@
 
 use std::sync::RwLock;
 
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::Receiver;
 use rnotepad_core::search::{CancelToken, CoreSearchService, SearchQuery, SearchService, TaskEvent};
 use tracing::{error, info};
 
@@ -51,16 +51,11 @@ impl SearchJob {
     /// Drains pending events without blocking.
     pub fn drain(&mut self) -> Vec<TaskEvent> {
         let mut events = Vec::new();
-        loop {
-            match self.receiver.try_recv() {
-                Ok(event) => {
-                    if matches!(event, TaskEvent::Done | TaskEvent::Failed(_)) {
-                        self.finished = true;
-                    }
-                    events.push(event);
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        while let Ok(event) = self.receiver.try_recv() {
+            if matches!(event, TaskEvent::Done | TaskEvent::Failed(_)) {
+                self.finished = true;
             }
+            events.push(event);
         }
         events
     }

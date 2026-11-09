@@ -13,8 +13,9 @@ use std::sync::{Arc, Once, RwLock};
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetStockObject, InvalidateRect, SetBkMode, UpdateWindow, HBRUSH,
-    PAINTSTRUCT, TRANSPARENT, WHITE_BRUSH,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    EndPaint, GetDC, GetStockObject, HDC, HGDIOBJ, InvalidateRect, ReleaseDC, SelectObject,
+    SetBkMode, UpdateWindow, HBRUSH, PAINTSTRUCT, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::SetScrollInfo;
@@ -27,9 +28,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetScrollInfo,
     GetWindowLongPtrW, LoadCursorW, MoveWindow, PostMessageW, RegisterClassW, SetWindowLongPtrW,
     ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, SB_BOTTOM, SB_ENDSCROLL,
-    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
-    SB_VERT, SCROLLINFO, SIF_ALL, SIF_DISABLENOSCROLL, SIF_PAGE, SIF_POS, SIF_RANGE, SW_SHOW,
-    WNDCLASSW, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    SB_HORZ, SB_LEFT, SB_LINEDOWN, SB_LINELEFT, SB_LINERIGHT, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_PAGELEFT, SB_PAGERIGHT, SB_RIGHT, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT,
+    SCROLLINFO, SIF_ALL, SIF_DISABLENOSCROLL, SIF_PAGE, SIF_POS, SIF_RANGE, SW_SHOW, WNDCLASSW,
+    WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_VSCROLL,
     WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_HSCROLL, WS_VISIBLE, WS_VSCROLL,
 };
@@ -39,12 +41,14 @@ use rnotepad_core::coord::RawByteOffset;
 use rnotepad_core::document::Document;
 use rnotepad_core::encoding::unit_len;
 
-use crate::dw::MonoFont;
+use crate::dw::{MonoFont, MAX_FONT_POINTS, MIN_FONT_POINTS};
 use crate::hex_view::ROW_GAP_PIXELS;
 use crate::error::{WinError, WinResult};
 
 /// Row height used before the first text measurement.
 const FALLBACK_ROW_PIXELS: i32 = 16;
+/// Glyph advance used for horizontal scrolling before the first measurement.
+const FALLBACK_CHAR_WIDTH: i32 = 8;
 /// Document shared by every view of the same file.
 pub type SharedDoc = Arc<RwLock<Document>>;
 
@@ -68,28 +72,20 @@ pub enum ViewKind {
 }
 
 /// Viewport state shared between the application and the window procedure.
+#[derive(Default)]
 pub struct ViewData {
     pub doc: Option<SharedDoc>,
     /// First visible logical line (text view).
     pub first_line: u32,
     /// First visible 16-byte row (hex view).
     pub first_row: u64,
+    /// Horizontal scroll offset of the hex grid, in pixels.  The offset gutter
+    /// stays pinned, so only the bytes and the ASCII preview move.
+    pub h_offset: i32,
     /// Sorted raw byte ranges highlighted by the current search.
     pub highlights: Vec<Range<u64>>,
     /// Selected raw byte range, if any.
     pub sel: Option<Range<u64>>,
-}
-
-impl Default for ViewData {
-    fn default() -> Self {
-        Self {
-            doc: None,
-            first_line: 0,
-            first_row: 0,
-            highlights: Vec::new(),
-            sel: None,
-        }
-    }
 }
 
 /// UI-thread handle to the viewport state.
@@ -98,6 +94,9 @@ pub type SharedViewData = Rc<RefCell<ViewData>>;
 const CLASS_NAME: windows::core::PCWSTR = w!("RNotepadViewWindow");
 const MAX_LINE_COUNT_HINT: u32 = 1_000_000;
 const WHEEL_LINES: i32 = 3;
+/// Number of wheel notches that span one hex screen; a notch therefore moves
+/// a quarter of the visible rows instead of a fixed line count.
+const HEX_WHEEL_NOTCHES_PER_PAGE: u64 = 4;
 const KEY_C: u32 = 0x43;
 /// Win32 `MK_LBUTTON` flag carried in `WM_MOUSEMOVE`'s `wParam`.
 const MK_LBUTTON_BIT: u32 = 0x0001;
@@ -106,6 +105,8 @@ struct ViewSlot {
     kind: ViewKind,
     data: SharedViewData,
     font: Option<MonoFont>,
+    /// Point size the font must use; the hex view follows the text zoom.
+    font_points: i32,
     /// Raw offset where the current mouse selection started.
     anchor: Option<u64>,
 }
@@ -118,13 +119,19 @@ pub struct ViewWindow {
 }
 
 impl ViewWindow {
-    /// Creates the child window.
-    pub fn create(parent: HWND, kind: ViewKind, data: SharedViewData) -> WinResult<Self> {
+    /// Creates the child window using `font_points` for its glyph cell.
+    pub fn create(
+        parent: HWND,
+        kind: ViewKind,
+        data: SharedViewData,
+        font_points: i32,
+    ) -> WinResult<Self> {
         register_class();
         let slot = Box::new(ViewSlot {
             kind,
             data: data.clone(),
             font: None,
+            font_points: font_points.clamp(MIN_FONT_POINTS, MAX_FONT_POINTS),
             anchor: None,
         });
         let slot_ptr = Box::into_raw(slot);
@@ -187,12 +194,48 @@ impl ViewWindow {
     /// Recomputes the scrollbar range after the document or viewport changed.
     pub fn refresh_scroll(&self) {
         // SAFETY: the window is live and the slot belongs to it.
-        let line_height = unsafe { slot(self.hwnd) }
+        let metrics = unsafe { slot(self.hwnd) }
             .and_then(|state| state.font.as_ref())
-            .map(|font| font.line_height);
+            .map(|font| (font.line_height, font.char_width));
         // SAFETY: live window; the scroll info struct is fully initialized.
         unsafe {
-            update_scroll(self.hwnd, self.kind, &self.data, line_height);
+            update_scroll(self.hwnd, self.kind, &self.data, metrics);
+        }
+    }
+
+    /// Changes the glyph point size, recreating the cell metrics immediately
+    /// so the scrollbar page matches the new row height.
+    pub fn set_font_points(&self, points: i32) {
+        // SAFETY: the window owns its slot until `WM_NCDESTROY`.
+        let Some(slot) = (unsafe { slot(self.hwnd) }) else {
+            return;
+        };
+        let points = points.clamp(MIN_FONT_POINTS, MAX_FONT_POINTS);
+        if slot.font_points == points {
+            return;
+        }
+        slot.font_points = points;
+        slot.font = None;
+        // Measure now rather than on the next paint so `update_scroll` sees the
+        // new row height.
+        let hdc = unsafe { GetDC(Some(self.hwnd)) };
+        if !hdc.is_invalid() {
+            let dpi = unsafe { GetDpiForWindow(self.hwnd) };
+            if let Ok(mut font) = MonoFont::new(dpi, points) {
+                if font.measure(hdc).is_ok() {
+                    slot.font = Some(font);
+                }
+            }
+            // SAFETY: the DC was obtained from `GetDC` above.
+            unsafe {
+                let _ = ReleaseDC(Some(self.hwnd), hdc);
+            }
+        }
+        let metrics = slot.font.as_ref().map(|font| (font.line_height, font.char_width));
+        // SAFETY: live window.
+        unsafe {
+            update_scroll(self.hwnd, self.kind, &self.data, metrics);
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
     }
 
@@ -200,6 +243,24 @@ impl ViewWindow {
     pub fn invalidate(&self) {
         // SAFETY: live window.
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// Scrolls the minimum number of rows needed to make `line` visible.
+    pub fn reveal_line(&self, line: u32) {
+        // SAFETY: the window owns its slot until `WM_NCDESTROY`.
+        if let Some(slot) = unsafe { slot(self.hwnd) } {
+            // SAFETY: live window with a valid slot.
+            unsafe { reveal(self.hwnd, slot, line as u64) };
+        }
+    }
+
+    /// Scrolls the minimum number of rows needed to make the byte row visible.
+    pub fn reveal_row(&self, row: u64) {
+        // SAFETY: the window owns its slot until `WM_NCDESTROY`.
+        if let Some(slot) = unsafe { slot(self.hwnd) } {
+            // SAFETY: live window with a valid slot.
+            unsafe { reveal(self.hwnd, slot, row) };
+        }
     }
 
     /// Scrolls to the last page; call [`Self::refresh_scroll`] first so the
@@ -277,8 +338,8 @@ unsafe extern "system" fn wndproc(
             unsafe {
                 let slot = slot(hwnd);
                 if let Some(slot) = slot {
-                    let line_height = slot.font.as_ref().map(|font| font.line_height);
-                    update_scroll(hwnd, slot.kind, &slot.data, line_height);
+                    let metrics = slot.font.as_ref().map(|font| (font.line_height, font.char_width));
+                    update_scroll(hwnd, slot.kind, &slot.data, metrics);
                 }
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -306,12 +367,23 @@ unsafe extern "system" fn wndproc(
             }
             LRESULT(0)
         }
+        WM_HSCROLL => {
+            // SAFETY: live window; only the hex view scrolls horizontally.
+            unsafe {
+                if let Some(slot) = slot(hwnd) {
+                    if slot.kind == ViewKind::Hex {
+                        apply_hscroll(hwnd, slot, (wparam.0 as u32) as i32);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_MOUSEWHEEL => {
             let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
             // SAFETY: live window.
             unsafe {
                 if let Some(slot) = slot(hwnd) {
-                    let lines = if delta >= 0 { WHEEL_LINES } else { -WHEEL_LINES };
+                    let lines = wheel_lines(hwnd, slot, delta);
                     scroll_lines(hwnd, slot, lines);
                 }
             }
@@ -323,7 +395,7 @@ unsafe extern "system" fn wndproc(
             unsafe {
                 if let Some(slot) = slot(hwnd) {
                     if key == KEY_C && GetKeyState(VK_CONTROL.0 as i32) < 0 {
-                        if let Some(parent) = GetParent(hwnd).ok() {
+                        if let Ok(parent) = GetParent(hwnd) {
                             let _ = PostMessageW(Some(parent), WM_APP_VIEW_COPY, WPARAM(0), LPARAM(0));
                         }
                     }
@@ -438,7 +510,7 @@ fn selection_end(slot: &ViewSlot, offset: u64) -> u64 {
                 return offset.saturating_add(1);
             };
             let local = usize::try_from(offset.saturating_sub(range.start)).unwrap_or(0);
-            let unit = unit_len(&raw, local, doc.encoding.charset).max(1) as u64;
+            let unit = unit_len(raw, local, doc.encoding.charset).max(1) as u64;
             offset.saturating_add(unit).min(range.end)
         }
     }
@@ -480,22 +552,59 @@ unsafe fn slot(hwnd: HWND) -> Option<&'static mut ViewSlot> {
     }
 }
 
-unsafe fn paint(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::HDC, slot: &mut ViewSlot) {
+unsafe fn paint(hwnd: HWND, hdc: HDC, slot: &mut ViewSlot) {
     let mut rect = RECT::default();
     // SAFETY: valid out parameter.
     let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    if rect.right <= 0 || rect.bottom <= 0 {
+        return;
+    }
+    // Draw the whole window into an off-screen bitmap first.  Repainting
+    // straight to the screen makes a selection change flash white.
+    let memory = unsafe { CreateCompatibleDC(Some(hdc)) };
+    let bitmap = unsafe { CreateCompatibleBitmap(hdc, rect.right, rect.bottom) };
+    if memory.is_invalid() || bitmap.is_invalid() {
+        if !bitmap.is_invalid() {
+            // SAFETY: the bitmap is owned and deleted exactly once.
+            let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
+        }
+        if !memory.is_invalid() {
+            // SAFETY: the DC is owned and deleted exactly once.
+            let _ = unsafe { DeleteDC(memory) };
+        }
+        return;
+    }
+    let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+    paint_content(hwnd, memory, slot, &rect);
+    // SAFETY: both DCs are valid; the bitmap is restored and freed afterwards.
+    unsafe {
+        let _ = BitBlt(hdc, 0, 0, rect.right, rect.bottom, Some(memory), 0, 0, SRCCOPY);
+        let _ = SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+    }
+}
+
+unsafe fn paint_content(hwnd: HWND, hdc: HDC, slot: &mut ViewSlot, rect: &RECT) {
     // SAFETY: valid HDC during WM_PAINT.
     unsafe {
         let brush = HBRUSH(GetStockObject(WHITE_BRUSH).0);
-        windows::Win32::Graphics::Gdi::FillRect(hdc, &rect, brush);
+        windows::Win32::Graphics::Gdi::FillRect(hdc, rect, brush);
         let _ = SetBkMode(hdc, TRANSPARENT);
     }
     if slot.font.is_none() {
         let dpi = unsafe { GetDpiForWindow(hwnd) };
-        match MonoFont::new(dpi) {
+        match MonoFont::new(dpi, slot.font_points) {
             Ok(mut font) => {
                 let _ = font.measure(hdc);
+                let metrics = (font.line_height, font.char_width);
                 slot.font = Some(font);
+                // The first measurement replaces the fallback metrics, so the
+                // scroll ranges must be recomputed before the next paint.
+                // SAFETY: live window; no data borrow is active here.
+                unsafe {
+                    update_scroll(hwnd, slot.kind, &slot.data, Some(metrics));
+                }
             }
             Err(_) => return,
         }
@@ -503,6 +612,10 @@ unsafe fn paint(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::HDC, slot: &mut 
     let Some(font) = slot.font.as_ref() else {
         return;
     };
+    // Select the grid font for the whole paint pass; without this GDI falls
+    // back to the system font and the glyphs no longer match the measured
+    // cell width, which makes the columns run together.
+    let _font_guard = font.select(hdc);
     let data = match slot.data.try_borrow() {
         Ok(data) => data,
         Err(_) => return, // Re-entrant paint; skip instead of panicking.
@@ -514,8 +627,8 @@ unsafe fn paint(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::HDC, slot: &mut 
         return;
     };
     match slot.kind {
-        ViewKind::Text => crate::large_view::paint(hdc, &rect, &doc, &data, font),
-        ViewKind::Hex => crate::hex_view::paint(hdc, &rect, &doc, &data, font),
+        ViewKind::Text => crate::large_view::paint(hdc, rect, &doc, &data, font),
+        ViewKind::Hex => crate::hex_view::paint(hdc, rect, &doc, &data, font),
     }
 }
 
@@ -549,10 +662,98 @@ unsafe fn apply_vscroll(hwnd: HWND, slot: &mut ViewSlot, code: i32) {
     }
 }
 
+/// Handles one `WM_HSCROLL` command for the hex view.
+unsafe fn apply_hscroll(hwnd: HWND, slot: &mut ViewSlot, code: i32) {
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_ALL,
+        ..Default::default()
+    };
+    if unsafe { GetScrollInfo(hwnd, SB_HORZ, &mut info) }.is_err() {
+        return;
+    }
+    let max_pos = thumb_max(&info);
+    let page = info.nPage.max(1) as i32;
+    let step = slot
+        .font
+        .as_ref()
+        .map(|font| font.char_width)
+        .unwrap_or(FALLBACK_CHAR_WIDTH)
+        .max(1);
+    match code {
+        c if c == SB_LINELEFT.0 => set_hpos(hwnd, slot, info.nPos - step),
+        c if c == SB_LINERIGHT.0 => set_hpos(hwnd, slot, info.nPos + step),
+        c if c == SB_PAGELEFT.0 => set_hpos(hwnd, slot, info.nPos - page),
+        c if c == SB_PAGERIGHT.0 => set_hpos(hwnd, slot, info.nPos + page),
+        c if c == SB_LEFT.0 => set_hpos(hwnd, slot, 0),
+        c if c == SB_RIGHT.0 => set_hpos(hwnd, slot, max_pos),
+        c if c == SB_THUMBTRACK.0 || c == SB_THUMBPOSITION.0 => {
+            set_hpos(hwnd, slot, info.nTrackPos)
+        }
+        c if c == SB_ENDSCROLL.0 => {}
+        _ => {}
+    }
+}
+
+/// Highest scrollbar position that still shows the right edge of the range.
+fn thumb_max(info: &SCROLLINFO) -> i32 {
+    let max = info.nMax as i64 - info.nPage as i64 + 1;
+    max.clamp(0, i32::MAX as i64) as i32
+}
+
+unsafe fn set_hpos(hwnd: HWND, slot: &mut ViewSlot, value: i32) {
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE,
+        ..Default::default()
+    };
+    // SAFETY: live window.
+    let _ = unsafe { GetScrollInfo(hwnd, SB_HORZ, &mut info) };
+    let value = value.clamp(0, thumb_max(&info));
+    if let Ok(mut data) = slot.data.try_borrow_mut() {
+        data.h_offset = value;
+    }
+    let pos = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_POS,
+        nPos: value,
+        ..Default::default()
+    };
+    // SAFETY: live window.
+    unsafe {
+        SetScrollInfo(hwnd, SB_HORZ, &pos, true);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
 unsafe fn scroll_lines(hwnd: HWND, slot: &mut ViewSlot, delta: i32) {
     let current = current_pos(slot);
     let next = (current as i64 + delta as i64).max(0) as u64;
     set_pos(hwnd, slot, next);
+}
+
+/// Signed rows to move for one wheel notch.
+///
+/// A positive delta means the wheel rotated forward, away from the user, so
+/// the viewport moves towards the beginning of the document.  The hex view
+/// moves a quarter of its visible rows per notch, so one notch never jumps
+/// more than half a screen.
+unsafe fn wheel_lines(hwnd: HWND, slot: &ViewSlot, delta: i16) -> i32 {
+    let direction = if delta >= 0 { -1 } else { 1 };
+    match slot.kind {
+        ViewKind::Text => direction * WHEEL_LINES,
+        ViewKind::Hex => {
+            let mut rect = RECT::default();
+            // SAFETY: valid out parameter.
+            let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+            let visible = match slot.font.as_ref() {
+                Some(font) => crate::hex_view::visible_rows(rect.bottom, font),
+                None => WHEEL_LINES as u64,
+            };
+            let rows = (visible / HEX_WHEEL_NOTCHES_PER_PAGE).max(1) as i32;
+            direction * rows
+        }
+    }
 }
 
 unsafe fn scroll_pages(hwnd: HWND, slot: &mut ViewSlot, direction: i32) {
@@ -612,22 +813,51 @@ unsafe fn set_pos(hwnd: HWND, slot: &mut ViewSlot, value: u64) {
     let _ = info;
 }
 
+/// Moves the viewport only when `target` falls outside the visible rows.
+///
+/// Selections call this instead of setting the first visible row directly, so
+/// the view never scrolls unless the target would otherwise be hidden.
+unsafe fn reveal(hwnd: HWND, slot: &mut ViewSlot, target: u64) {
+    let mut rect = RECT::default();
+    // SAFETY: valid out parameter.
+    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    let Some(font) = slot.font.as_ref() else {
+        return;
+    };
+    let visible = match slot.kind {
+        ViewKind::Text => font.rows_in(rect.bottom) as u64,
+        ViewKind::Hex => crate::hex_view::visible_rows(rect.bottom, font),
+    };
+    if visible == 0 {
+        return;
+    }
+    let current = match slot.kind {
+        ViewKind::Text => slot.data.borrow().first_line as u64,
+        ViewKind::Hex => slot.data.borrow().first_row,
+    };
+    if target < current {
+        set_pos(hwnd, slot, target);
+    } else if target >= current.saturating_add(visible) {
+        set_pos(hwnd, slot, target.saturating_sub(visible - 1));
+    }
+}
+
 /// # Safety
 /// `hwnd` must be a live view window.
 unsafe fn update_scroll(
     hwnd: HWND,
     kind: ViewKind,
     data: &SharedViewData,
-    line_height: Option<i32>,
+    metrics: Option<(i32, i32)>,
 ) {
     let mut rect = RECT::default();
     // SAFETY: valid out parameter.
     let _ = unsafe { GetClientRect(hwnd, &mut rect) };
-    let data = data.borrow();
+    let (line_height, char_width) = metrics.unwrap_or((FALLBACK_ROW_PIXELS, FALLBACK_CHAR_WIDTH));
+    let mut data = data.borrow_mut();
     let (total, page) = match data.doc.as_ref() {
         Some(doc) => {
             let Ok(doc) = doc.read() else { return };
-            let row_height = line_height.unwrap_or(FALLBACK_ROW_PIXELS);
             match kind {
                 ViewKind::Text => {
                     let lines = doc
@@ -635,20 +865,20 @@ unsafe fn update_scroll(
                         .total_lines()
                         .unwrap_or_else(|| doc.line_index.scanned_line_hint())
                         .min(MAX_LINE_COUNT_HINT);
-                    (lines as u64, estimate_page(rect.bottom, row_height, 0))
+                    (lines as u64, estimate_page(rect.bottom, line_height, 0))
                 }
                 ViewKind::Hex => {
                     let rows = doc.raw.len() / 16 + 1;
                     (
                         rows,
-                        estimate_page(rect.bottom, row_height + ROW_GAP_PIXELS, 1),
+                        estimate_page(rect.bottom, line_height + ROW_GAP_PIXELS, 1),
                     )
                 }
             }
         }
         None => (0, 1),
     };
-    let mut info = SCROLLINFO {
+    let vert = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
         fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
         nMin: 0,
@@ -662,9 +892,45 @@ unsafe fn update_scroll(
     };
     // SAFETY: live window.
     unsafe {
-        SetScrollInfo(hwnd, SB_VERT, &info, true);
+        SetScrollInfo(hwnd, SB_VERT, &vert, true);
     }
-    let _ = &mut info;
+
+    // The hex layout is wider than most panes, so it needs a real horizontal
+    // scrollbar.  The offset gutter is pinned during that scroll, hence the
+    // content width is measured across the whole grid plus the ASCII preview.
+    if kind == ViewKind::Hex {
+        let content = (crate::hex_view::CONTENT_CELLS as i32).saturating_mul(char_width.max(1));
+        let viewport = rect.right.max(1);
+        let max_pos = (content - viewport).max(0);
+        data.h_offset = data.h_offset.clamp(0, max_pos);
+        let horz = SCROLLINFO {
+            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
+            nMin: 0,
+            nMax: (content - 1).max(0),
+            nPage: viewport as u32,
+            nPos: data.h_offset,
+            ..Default::default()
+        };
+        // SAFETY: live window.
+        unsafe {
+            SetScrollInfo(hwnd, SB_HORZ, &horz, true);
+        }
+    } else {
+        // Text views do not scroll horizontally; hide the unused bar.
+        let horz = SCROLLINFO {
+            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE,
+            nMin: 0,
+            nMax: 0,
+            nPage: 1,
+            ..Default::default()
+        };
+        // SAFETY: live window.
+        unsafe {
+            SetScrollInfo(hwnd, SB_HORZ, &horz, true);
+        }
+    }
 }
 
 /// Positive row count that fits the viewport below the column header.

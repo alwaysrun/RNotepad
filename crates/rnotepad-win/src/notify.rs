@@ -5,7 +5,7 @@
 //! user (dirty editable documents).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{channel, Receiver};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -51,19 +51,16 @@ impl ChangeWatcher {
     #[must_use]
     pub fn take_change(&self) -> bool {
         let mut changed = false;
-        loop {
-            match self.receiver.try_recv() {
-                Ok(_) => changed = true,
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while self.receiver.try_recv().is_ok() {
+            changed = true;
         }
         changed
     }
 }
 
 fn is_change(kind: &EventKind) -> bool {
-    match kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
-        _ => false,
-    }
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
 }

@@ -2,8 +2,8 @@
 //!
 //! Rows are read directly from the shared [`rnotepad_core::bytes::RawBytes`],
 //! so even a multi-gigabyte log only keeps one screen of bytes in memory.
-//! Layout: `Offset(0x + 8 hex) | 8 bytes | 8 bytes | ASCII`, with a column
-//! header row and a wider gap between the two byte groups.
+//! Layout: `Offset(0x + 8 hex) | 4 x 4 bytes | ASCII`, with a column header
+//! row and a wider gap after every group of four bytes.
 
 use std::ops::Range;
 
@@ -12,8 +12,8 @@ use rnotepad_core::document::Document;
 use rnotepad_core::encoding::{decode, unit_len, Charset};
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DeleteObject, FillRect, HBRUSH, HDC, HGDIOBJ, SetBkMode, SetTextColor,
-    TextOutW, TRANSPARENT,
+    CreateSolidBrush, DeleteObject, FillRect, HBRUSH, HDC, HGDIOBJ, IntersectClipRect,
+    RestoreDC, SaveDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
 };
 
 use crate::dw::{column_to_x, rgb, MonoFont};
@@ -23,6 +23,11 @@ const HEX_TEXT_COLOR: COLORREF = rgb(40, 40, 40);
 const OFFSET_TEXT_COLOR: COLORREF = rgb(120, 120, 120);
 const HEADER_BACKGROUND: COLORREF = rgb(245, 245, 245);
 const HEADER_TEXT_COLOR: COLORREF = rgb(140, 140, 140);
+/// Background of the pinned offset gutter.
+const GUTTER_BACKGROUND: COLORREF = rgb(248, 248, 248);
+/// One-pixel rule that separates the gutter from the scrolling grid.
+const GUTTER_RULE_COLOR: COLORREF = rgb(222, 222, 222);
+const RULE_WIDTH: i32 = 1;
 const BOM_COLOR: COLORREF = rgb(214, 234, 255);
 const EOL_COLOR: COLORREF = rgb(214, 246, 218);
 const HIGHLIGHT_COLOR: COLORREF = rgb(255, 232, 140);
@@ -33,15 +38,23 @@ const MULTIBYTE_COLOR: COLORREF = rgb(238, 234, 250);
 const BYTES_PER_ROW: usize = 16;
 /// Bytes per visual group; four columns read comfortably as `AB CD EF 01`.
 const GROUP_BYTES: usize = 4;
-const HEX_CELLS_PER_BYTE: usize = 3;
+/// Cells reserved per byte: two hex digits plus two blank cells that keep
+/// neighbouring bytes visually apart.
+const HEX_CELLS_PER_BYTE: usize = 4;
 const OFFSET_PREFIX: &str = "0x";
 const OFFSET_HEX_DIGITS: usize = 8;
 const OFFSET_CELLS: usize = OFFSET_PREFIX.len() + OFFSET_HEX_DIGITS;
-const OFFSET_GAP_CELLS: usize = 1;
-/// Extra cells between groups. Combined with the trailing byte space this
-/// renders as four blank columns, e.g. `AB CD EF 01    23 45 67 89`.
-const GROUP_GAP_CELLS: usize = 3;
-const ASCII_GAP_CELLS: usize = 2;
+/// Blank cells between the offset and the first byte, so the two are easy to
+/// tell apart at a glance.
+const OFFSET_GAP_CELLS: usize = 4;
+/// Extra cells between groups. Combined with the two blank cells after each
+/// byte this renders four blank columns, e.g. `EF 8B FB 01    23 45 67 89`.
+const GROUP_GAP_CELLS: usize = 2;
+/// Blank cells between the hex grid and the ASCII preview.
+const ASCII_GAP_CELLS: usize = 4;
+/// Cells per preview character; the extra cell keeps the characters from
+/// running together.
+const ASCII_CELLS_PER_CHAR: usize = 2;
 /// Extra vertical pixels per row so dense hex lines stay easy to scan.
 pub const ROW_GAP_PIXELS: i32 = 2;
 const HEADER_ROWS: i32 = 1;
@@ -66,10 +79,40 @@ const fn byte_column(index: usize) -> u32 {
 /// Column of the ASCII preview.
 const ASCII_COLUMN: u32 =
     byte_column(BYTES_PER_ROW - 1) + HEX_CELLS_PER_BYTE as u32 + ASCII_GAP_CELLS as u32;
+/// Cell columns occupied by the pinned offset gutter.
+pub const GUTTER_CELLS: u32 = GRID_COLUMN as u32;
+/// Total cell columns of the complete hex layout, gutter included.
+pub const CONTENT_CELLS: u32 =
+    ASCII_COLUMN + (BYTES_PER_ROW * ASCII_CELLS_PER_CHAR) as u32;
+
+/// Pixel width of the pinned offset gutter.
+#[must_use]
+pub fn gutter_width(font: &MonoFont) -> i32 {
+    column_to_x(font, GUTTER_CELLS)
+}
+
+/// Pixel width of the whole hex layout, gutter included.
+#[must_use]
+pub fn content_width(font: &MonoFont) -> i32 {
+    column_to_x(font, CONTENT_CELLS)
+}
+
+/// Largest horizontal offset that still shows the right edge of the layout.
+#[must_use]
+pub fn max_h_offset(font: &MonoFont, client_width: i32) -> i32 {
+    (content_width(font) - client_width.max(0)).max(0)
+}
 
 /// Height of one painted hex row, including the extra breathing space.
 fn row_height(font: &MonoFont) -> i32 {
     font.line_height + ROW_GAP_PIXELS
+}
+
+/// Number of byte rows that fit below the column header.
+#[must_use]
+pub fn visible_rows(height: i32, font: &MonoFont) -> u64 {
+    let rows = (height / row_height(font).max(1) - HEADER_ROWS).max(NO_ROWS);
+    u64::from(rows as u32)
 }
 
 /// What the preview column shows for one byte.
@@ -120,14 +163,43 @@ pub fn paint(hdc: HDC, rect: &RECT, doc: &Document, data: &ViewData, font: &Mono
     let brush_selection = SolidBrush::create(SELECTION_COLOR);
     let brush_multibyte = SolidBrush::create(MULTIBYTE_COLOR);
     let brush_header = SolidBrush::create(HEADER_BACKGROUND);
+    let brush_gutter = SolidBrush::create(GUTTER_BACKGROUND);
+    let brush_rule = SolidBrush::create(GUTTER_RULE_COLOR);
 
-    draw_header(hdc, rect, font, brush_header.as_ref());
+    let h_offset = data.h_offset.clamp(0, max_h_offset(font, rect.right));
+    let gutter = gutter_width(font);
+    let header_bottom = (HEADER_ROWS * row_height(font)).min(rect.bottom.max(NO_ROWS));
+
+    draw_header(hdc, rect, font, brush_header.as_ref(), gutter, h_offset);
+    draw_gutter(
+        hdc,
+        rect,
+        header_bottom,
+        gutter,
+        brush_gutter.as_ref(),
+        brush_rule.as_ref(),
+    );
 
     let total = doc.raw.len();
-    let rows = (rect.bottom / row_height(font).max(1)).max(NO_ROWS);
-    let visible_rows = (rows - HEADER_ROWS).max(NO_ROWS);
+    let visible_rows = visible_rows(rect.bottom, font) as i32;
     let charset = doc.encoding.charset;
     let bom_len = doc.encoding.bom.len();
+
+    // The offsets live in the pinned gutter and never scroll, so they are
+    // drawn before the clipped grid pass.
+    draw_offsets(hdc, data, total, font, visible_rows);
+
+    // Clip everything right of the gutter; scrolled cells then slide under the
+    // pinned offset column instead of painting over it.
+    let saved = unsafe { SaveDC(hdc) };
+    if saved == 0 {
+        return;
+    }
+    let clip_left = gutter.min(rect.right);
+    // SAFETY: `saved` guarantees a matching `RestoreDC` below.
+    unsafe {
+        let _ = IntersectClipRect(hdc, clip_left, header_bottom, rect.right, rect.bottom);
+    }
 
     for row_index in 0..visible_rows {
         let row = data.first_row.saturating_add(row_index as u64);
@@ -152,6 +224,7 @@ pub fn paint(hdc: HDC, rect: &RECT, doc: &Document, data: &ViewData, font: &Mono
             &selected,
             font,
             y,
+            h_offset,
             &brush_bom,
             &brush_eol,
             &brush_highlight,
@@ -159,14 +232,8 @@ pub fn paint(hdc: HDC, rect: &RECT, doc: &Document, data: &ViewData, font: &Mono
             &brush_multibyte,
         );
 
-        let offset = format!("{OFFSET_PREFIX}{start:08X}");
-        // SAFETY: valid DC and UTF-16 slices that outlive the calls.
-        unsafe {
-            SetTextColor(hdc, OFFSET_TEXT_COLOR);
-            let _ = TextOutW(hdc, 0, y, &wide(&offset));
-        }
         for (index, byte) in raw.iter().enumerate() {
-            let x = column_to_x(font, byte_column(index));
+            let x = column_to_x(font, byte_column(index)) - h_offset;
             // Selected bytes invert to white on the accent background, matching
             // the reference editor.
             // SAFETY: valid DC.
@@ -194,17 +261,93 @@ pub fn paint(hdc: HDC, rect: &RECT, doc: &Document, data: &ViewData, font: &Mono
                 PreviewCell::Dot => PREVIEW_DOT.to_string(),
                 PreviewCell::Blank => continue,
             };
-            let x = column_to_x(font, ASCII_COLUMN + index as u32);
+            let column = ASCII_COLUMN + (index as u32) * ASCII_CELLS_PER_CHAR as u32;
+            let x = column_to_x(font, column) - h_offset;
             // SAFETY: valid DC.
             unsafe {
                 let _ = TextOutW(hdc, x, y, &wide(&text));
             }
         }
     }
+
+    // SAFETY: restores the DC state saved above.
+    unsafe {
+        let _ = RestoreDC(hdc, saved);
+    }
+}
+
+/// Fills the pinned offset gutter and its separating rule.
+fn draw_gutter(
+    hdc: HDC,
+    rect: &RECT,
+    header_bottom: i32,
+    gutter: i32,
+    background: Option<&SolidBrush>,
+    rule: Option<&SolidBrush>,
+) {
+    let body = RECT {
+        left: rect.left,
+        top: header_bottom,
+        right: gutter,
+        bottom: rect.bottom,
+    };
+    if let Some(brush) = background {
+        // SAFETY: valid DC, rectangle and brush.
+        unsafe {
+            let _ = FillRect(hdc, &body, brush.0);
+        }
+    }
+    if let Some(brush) = rule {
+        let separator = RECT {
+            left: (gutter - RULE_WIDTH).max(rect.left),
+            top: rect.top,
+            right: gutter,
+            bottom: rect.bottom,
+        };
+        // SAFETY: valid DC, rectangle and brush.
+        unsafe {
+            let _ = FillRect(hdc, &separator, brush.0);
+        }
+    }
+}
+
+/// Draws the fixed row offsets inside the gutter.
+fn draw_offsets(
+    hdc: HDC,
+    data: &ViewData,
+    total: u64,
+    font: &MonoFont,
+    visible_rows: i32,
+) {
+    let height = row_height(font);
+    // SAFETY: valid DC and UTF-16 slices that outlive the calls.
+    unsafe {
+        SetTextColor(hdc, OFFSET_TEXT_COLOR);
+        for row_index in 0..visible_rows {
+            let row = data.first_row.saturating_add(row_index as u64);
+            let start = row.saturating_mul(BYTES_PER_ROW as u64);
+            if start >= total {
+                break;
+            }
+            let y = (row_index + HEADER_ROWS) * height;
+            let offset = format!("{OFFSET_PREFIX}{start:08X}");
+            let _ = TextOutW(hdc, 0, y, &wide(&offset));
+        }
+    }
 }
 
 /// Draws the `Offset`, byte-index and `ASCII` labels in the first row.
-fn draw_header(hdc: HDC, rect: &RECT, font: &MonoFont, background: Option<&SolidBrush>) {
+///
+/// The `Offset` label is pinned with the gutter; the byte-index and `ASCII`
+/// labels follow the grid's horizontal offset.
+fn draw_header(
+    hdc: HDC,
+    rect: &RECT,
+    font: &MonoFont,
+    background: Option<&SolidBrush>,
+    gutter: i32,
+    h_offset: i32,
+) {
     let bottom = (HEADER_ROWS * row_height(font)).min(rect.bottom.max(NO_ROWS));
     let header = RECT {
         left: rect.left,
@@ -225,17 +368,22 @@ fn draw_header(hdc: HDC, rect: &RECT, font: &MonoFont, background: Option<&Solid
         SetTextColor(hdc, HEADER_TEXT_COLOR);
         let _ = TextOutW(hdc, offset_x, rect.top, &wide(OFFSET_LABEL));
     }
-    for index in 0..BYTES_PER_ROW {
-        let x = column_to_x(font, byte_column(index));
-        // SAFETY: valid DC.
-        unsafe {
+
+    let saved = unsafe { SaveDC(hdc) };
+    if saved == 0 {
+        return;
+    }
+    let clip_left = gutter.min(rect.right);
+    // SAFETY: `saved` guarantees a matching `RestoreDC` below.
+    unsafe {
+        let _ = IntersectClipRect(hdc, clip_left, header.top, rect.right, header.bottom);
+        for index in 0..BYTES_PER_ROW {
+            let x = column_to_x(font, byte_column(index)) - h_offset;
             let _ = TextOutW(hdc, x, rect.top, &wide(&format!("{index:02X}")));
         }
-    }
-    let ascii_x = column_to_x(font, ASCII_COLUMN);
-    // SAFETY: valid DC.
-    unsafe {
+        let ascii_x = column_to_x(font, ASCII_COLUMN) - h_offset;
         let _ = TextOutW(hdc, ascii_x, rect.top, &wide(ASCII_LABEL));
+        let _ = RestoreDC(hdc, saved);
     }
 }
 
@@ -260,6 +408,7 @@ fn draw_byte_backgrounds(
     selected: &[bool],
     font: &MonoFont,
     y: i32,
+    h_offset: i32,
     brush_bom: &Option<SolidBrush>,
     brush_eol: &Option<SolidBrush>,
     brush_highlight: &Option<SolidBrush>,
@@ -290,7 +439,7 @@ fn draw_byte_backgrounds(
             )
         };
         let Some(brush) = brush else { continue };
-        let x = column_to_x(font, byte_column(index));
+        let x = column_to_x(font, byte_column(index)) - h_offset;
         let rect = RECT {
             left: x,
             top: y,
@@ -304,6 +453,9 @@ fn draw_byte_backgrounds(
     }
 }
 
+/// Picks the tint brush for one byte; kept explicit because the three masks
+/// describe independent, mutually exclusive byte classes.
+#[allow(clippy::too_many_arguments)]
 fn class_brush<'a>(
     offset: u64,
     bom_len: u64,
@@ -412,9 +564,10 @@ fn preview_for(text: &str) -> PreviewCell {
 
 /// Maps a client point to the raw byte cell under the cursor.
 ///
-/// The x axis is clamped to the byte grid, so clicks in the offset or ASCII
-/// columns still select the nearest byte on that row. Clicks on the column
-/// header select nothing.
+/// The pinned offset gutter and the column header are not selectable.  Clicks
+/// right of the gutter are mapped against the current horizontal offset, and
+/// the x axis is clamped to the byte grid so clicks in the ASCII column still
+/// select the nearest byte on that row.
 pub fn hit_test(
     doc: &Document,
     data: &ViewData,
@@ -423,6 +576,9 @@ pub fn hit_test(
     y: i32,
 ) -> Option<u64> {
     if font.line_height <= NO_ROWS || font.char_width <= NO_ROWS {
+        return None;
+    }
+    if x < gutter_width(font) {
         return None;
     }
     let height = row_height(font);
@@ -437,7 +593,7 @@ pub fn hit_test(
     if start >= total {
         return None;
     }
-    let index = byte_index_at(x, font);
+    let index = byte_index_at(x.saturating_add(data.h_offset), font);
     let available = usize::try_from(total - start).ok()?;
     let index = index.min(available.saturating_sub(1));
     Some(start + index as u64)

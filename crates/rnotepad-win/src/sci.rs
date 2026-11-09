@@ -12,6 +12,7 @@ use rnotepad_core::eol::EolKind;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
+use windows::Win32::UI::Controls::NMHDR;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetClientRect, SendMessageW, SetWindowPos,
@@ -26,6 +27,12 @@ const DLL_NAME: &str = "Scintilla.dll";
 const ANCESTOR_SEARCH_LEVELS: usize = 4;
 const STYLE_DEFAULT: usize = 32;
 const STYLE_LINE_NUMBER: usize = 33;
+/// Longest byte length of a line that still counts as freshly opened.
+///
+/// Scintilla reports both `\r` and `\n` of a CRLF newline as separate
+/// `SCN_CHARADDED` events, so indentation would be inserted twice without
+/// requiring the caret line to be a bare new line (at most a CRLF terminator).
+const MAX_FRESH_LINE_BYTES: usize = 2;
 const INDICATOR_INDEX: usize = 0;
 const INDIC_ROUNDBOX: usize = 7;
 const SCFIND_WHOLEWORD: usize = 0x0000_0002;
@@ -44,11 +51,24 @@ const NOT_FOUND: isize = -1;
 ///
 /// Re-exported so the application does not depend on raw notification numbers.
 pub const SCN_UPDATEUI_CODE: u32 = 2007;
+/// Scintilla notification code emitted when the user typed a character.
+pub const SCN_CHARADDED_CODE: u32 = 2001;
+
+/// Newline as Scintilla reports it in `SCN_CHARADDED`, independent of the
+/// document's EOL mode.
+const NEWLINE_CHAR: u8 = b'\n';
+/// Carriage return, accepted as a newline for defensive completeness.
+const CARRIAGE_RETURN_CHAR: u8 = b'\r';
+/// Scintilla notification code emitted when the user changed the zoom level.
+pub const SCN_ZOOM_CODE: u32 = SCN_ZOOM;
 
 /// Text colours expressed as Scintilla's `0x00BBGGRR` values.
 const TEXT_COLOUR: usize = 0x0018_1818;
 const CARET_LINE_COLOUR: usize = 0x00F6_F0E8;
-const FIND_COLOUR: usize = 0x0040_9A_FF;
+const FIND_COLOUR: usize = 0x0040_9AFF;
+/// Selection palette shared with the hex view: accent fill, white text.
+const SELECTION_BACK_COLOUR: usize = sci_colour(26, 115, 232);
+const SELECTION_TEXT_COLOUR: usize = sci_colour(255, 255, 255);
 
 /// Scintilla's `CHARRANGE`, whose fields are 32-bit Windows `long` values.
 #[repr(C)]
@@ -64,6 +84,13 @@ struct TextToFind {
     range: CharRange,
     text: *const u8,
     found: CharRange,
+}
+
+/// Scintilla's `TextRange` structure.
+#[repr(C)]
+struct TextRange {
+    range: CharRange,
+    text: *mut u8,
 }
 
 /// Handle to a Scintilla child window.
@@ -131,7 +158,10 @@ impl Scintilla {
         self.send(SCI_SETTABWIDTH, 4, 0);
         self.send(SCI_SETCARETLINEVISIBLE, 1, 0);
         self.send(SCI_SETCARETLINEBACK, CARET_LINE_COLOUR, 0);
-        self.send(SCI_SETSELBACK, 1, 0x00CC_E2FF);
+        self.send(SCI_SETSELBACK, 1, SELECTION_BACK_COLOUR as isize);
+        self.send(SCI_SETSELFORE, 1, SELECTION_TEXT_COLOUR as isize);
+        self.send(SCI_SETADDITIONALSELBACK, 1, SELECTION_BACK_COLOUR as isize);
+        self.send(SCI_SETADDITIONALSELFORE, 1, SELECTION_TEXT_COLOUR as isize);
         self.send(SCI_SETCARETFORE, TEXT_COLOUR, 0);
         self.send(SCI_INDICSETSTYLE, INDICATOR_INDEX, INDIC_ROUNDBOX as isize);
         self.send(SCI_INDICSETFORE, INDICATOR_INDEX, FIND_COLOUR as isize);
@@ -254,6 +284,72 @@ impl Scintilla {
         (start.min(end), start.max(end))
     }
 
+    /// Returns the UTF-8 text in the given byte range.
+    #[must_use]
+    pub fn text_range(&self, start: usize, end: usize) -> String {
+        let length = end.saturating_sub(start);
+        if length == 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u8; length + 1];
+        let mut range = TextRange {
+            range: CharRange {
+                cp_min: start as i32,
+                cp_max: end as i32,
+            },
+            text: buffer.as_mut_ptr(),
+        };
+        self.send(SCI_GETTEXTRANGE, 0, &mut range as *mut TextRange as isize);
+        buffer.truncate(length);
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+
+    /// Copies the leading whitespace of the line above the caret.
+    ///
+    /// Scintilla emits `SCN_CHARADDED` for the newline after the caret has
+    /// moved onto the new line, so this must run from that notification.  Tabs
+    /// and spaces are copied byte for byte, and the caret ends up after the
+    /// inserted indentation.  Returns `false` when the control is read-only,
+    /// the caret is on the first line, the caret line is not freshly opened,
+    /// or the line above has no indentation.
+    pub fn apply_previous_indent(&self) -> bool {
+        if self.send(SCI_GETREADONLY, 0, 0) != 0 {
+            return false;
+        }
+        let position = self.current_position();
+        let line = self.send(SCI_LINEFROMPOSITION, position, 0).max(0) as usize;
+        if line == 0 {
+            return false;
+        }
+        // A CRLF Enter raises SCN_CHARADDED twice; only the first event sees
+        // an empty line, so this guard prevents double indentation.
+        let line_bytes = self.send(SCI_LINELENGTH, line, 0).max(0) as usize;
+        if line_bytes > MAX_FRESH_LINE_BYTES {
+            return false;
+        }
+        let previous = line - 1;
+        let previous_start = self.send(SCI_POSITIONFROMLINE, previous, 0).max(0) as usize;
+        let indent_end = self
+            .send(SCI_GETLINEINDENTPOSITION, previous, 0)
+            .max(0) as usize;
+        if indent_end <= previous_start || indent_end > position {
+            return false;
+        }
+        let indent = self.text_range(previous_start, indent_end);
+        if indent.is_empty() {
+            return false;
+        }
+        let value = c_string(&indent);
+        self.send(SCI_REPLACESEL, 0, value.as_ptr() as isize);
+        true
+    }
+
+    /// Current zoom in points relative to the base font size.
+    #[must_use]
+    pub fn zoom(&self) -> i32 {
+        self.send(SCI_GETZOOM, 0, 0) as i32
+    }
+
     /// Scrolls to the given logical line.
     pub fn scroll_to_line(&self, line: u32) {
         let position = self.send(SCI_POSITIONFROMLINE, line as usize, 0).max(0) as usize;
@@ -323,7 +419,7 @@ impl Scintilla {
 
     fn find_in(
         &self,
-        needle: &mut Vec<u8>,
+        needle: &mut [u8],
         flags: usize,
         start: usize,
         end: usize,
@@ -407,6 +503,35 @@ impl Drop for Scintilla {
         // SAFETY: destroying a window created by this object.
         let _ = unsafe { DestroyWindow(self.hwnd) };
     }
+}
+
+/// `SCNotification` prefix needed to read the typed character.
+///
+/// The real structure continues with `modifiers` and further fields, but the
+/// notification only needs the leading members to answer this question.
+/// `Sci_Position` is `ptrdiff_t`, so it occupies 8 bytes on 64-bit Windows;
+/// treating it as `i32` shifts `ch` by four bytes and hides every newline.
+#[repr(C)]
+struct ScNotificationHead {
+    nmhdr: NMHDR,
+    _position: isize,
+    ch: i32,
+}
+
+/// `true` when an `SCN_CHARADDED` notification reports a line break.
+///
+/// # Safety contract
+///
+/// `lparam` must be the `WM_NOTIFY` value delivered for `SCN_CHARADDED`.
+#[must_use]
+pub fn is_newline_char_added(lparam: isize) -> bool {
+    if lparam == 0 {
+        return false;
+    }
+    // SAFETY: the caller passes the notification payload of SCN_CHARADDED.
+    let notification = unsafe { &*(lparam as *const ScNotificationHead) };
+    notification.ch == i32::from(NEWLINE_CHAR)
+        || notification.ch == i32::from(CARRIAGE_RETURN_CHAR)
 }
 
 fn kind_mode(kind: EolKind) -> i32 {

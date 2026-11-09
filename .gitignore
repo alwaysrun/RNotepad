@@ -4,6 +4,11 @@
 /target/
 
 # ---------------------------------------------------------------------------
+# Runnable bundle assembled by scripts/build-crates.ps1
+# ---------------------------------------------------------------------------
+/output/
+
+# ---------------------------------------------------------------------------
 # Rust temporary files and dependency lock file
 # Cargo.lock is intentionally left untracked; every build resolves versions.
 # ---------------------------------------------------------------------------

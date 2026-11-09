@@ -388,7 +388,7 @@ fn search_text(
         let core_utf8_len = (core_utf8_pos.0 as u64).saturating_sub(base_utf8) as usize;
 
         let window = document.raw.slice(start..end).unwrap_or_default();
-        let text = decode_window_text(document, window, start == bom);
+        let text = decode_window_text(document, window);
         for found in regex.find_iter(&text) {
             if found.start() >= core_utf8_len {
                 break;
@@ -422,14 +422,8 @@ fn search_text(
     Ok(())
 }
 
-fn decode_window_text(document: &Document, window: &[u8], skip_bom: bool) -> String {
-    let charset = document.encoding.charset;
-    let data = if skip_bom && charset.is_utf8() {
-        window
-    } else {
-        window
-    };
-    crate::encoding::decode(data, charset, 0).text
+fn decode_window_text(document: &Document, window: &[u8]) -> String {
+    crate::encoding::decode(window, document.encoding.charset, 0).text
 }
 
 fn build_text_regex(query: &SearchQuery) -> Result<regex::Regex, SearchError> {
@@ -456,9 +450,7 @@ pub fn parse_hex_pattern(pattern: &str) -> Result<Vec<u8>, SearchError> {
     for ch in pattern.chars() {
         if ch.is_ascii_hexdigit() {
             cleaned.push(ch);
-        } else if ch.is_whitespace() || ch == ',' || ch == '_' {
-            continue;
-        } else if ch == '\\' || ch == 'x' || ch == 'X' || ch == '0' {
+        } else if ch.is_whitespace() || matches!(ch, ',' | '_' | '\\' | 'x' | 'X' | '0') {
             continue;
         } else {
             return Err(SearchError::InvalidHex(format!("unexpected character '{ch}'")));

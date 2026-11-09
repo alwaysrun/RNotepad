@@ -25,10 +25,15 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 
 /// Default point size of the editor font.
 pub const DEFAULT_FONT_POINTS: i32 = 10;
+/// Smallest point size accepted for the self-drawn views.
+pub const MIN_FONT_POINTS: i32 = 6;
+/// Largest point size accepted for the self-drawn views.
+pub const MAX_FONT_POINTS: i32 = 48;
 /// Extra pixels between rows.
 pub const ROW_GAP: i32 = 2;
 /// Font weight used by the editor.
 pub const FONT_WEIGHT_NORMAL: i32 = 400;
+const POINTS_PER_INCH: i32 = 72;
 const PITCH_AND_FAMILY: u32 = FIXED_PITCH.0 as u32 | FF_MODERN.0 as u32;
 
 /// Owned monospaced font with cell metrics.
@@ -39,9 +44,16 @@ pub struct MonoFont {
 }
 
 impl MonoFont {
-    /// Creates a `Consolas` font sized for `dpi`.
-    pub fn new(dpi: u32) -> Result<Self, WinError> {
-        let height = -((DEFAULT_FONT_POINTS * dpi as i32) / 96);
+    /// Creates a `Consolas` font sized for `dpi` and `points`.
+    ///
+    /// `points` matches the value passed to `SCI_STYLESETSIZE`, so the
+    /// self-drawn views keep the same glyph size as the text control even
+    /// after the user zooms it.
+    pub fn new(dpi: u32, points: i32) -> Result<Self, WinError> {
+        let points = points.clamp(MIN_FONT_POINTS, MAX_FONT_POINTS);
+        // A negative height asks GDI for a character cell of that many device
+        // pixels, which is the point size converted through the screen DPI.
+        let height = -((points * dpi as i32) / POINTS_PER_INCH).max(1);
         // SAFETY: all parameters are plain integers or a static wide string.
         let handle = unsafe {
             CreateFontW(
@@ -73,7 +85,10 @@ impl MonoFont {
 
     /// Measures the font cell with a device context.
     pub fn measure(&mut self, hdc: HDC) -> Result<(), WinError> {
-        let sample = [b'M' as u16, b'g' as u16];
+        // A single glyph reports the exact advance width.  Measuring two
+        // glyphs and halving the result would round down on odd widths and
+        // make the column grid drift away from the drawn text.
+        let sample = [b'M' as u16];
         let mut size = windows::Win32::Foundation::SIZE::default();
         let measured = {
             let guard = self.select(hdc);
@@ -88,7 +103,7 @@ impl MonoFont {
                 "GetTextExtentPoint32W failed with Win32 error {code:?}"
             )));
         }
-        self.char_width = size.cx.max(1) / 2;
+        self.char_width = size.cx.max(1);
         self.line_height = (size.cy + ROW_GAP).max(1);
         Ok(())
     }

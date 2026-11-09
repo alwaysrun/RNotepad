@@ -28,6 +28,11 @@ pub trait ByteSource: Send + Sync {
     /// Total number of bytes.
     fn len(&self) -> u64;
 
+    /// `true` when the source holds no bytes.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Reads at most `dst.len()` bytes starting at `off`.
     ///
     /// Returns the number of bytes actually copied.  Reading zero bytes past
