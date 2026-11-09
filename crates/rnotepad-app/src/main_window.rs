@@ -35,19 +35,15 @@ use windows::Win32::UI::Controls::Dialogs::{
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, BST_CHECKED, EM_SETSEL, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
     ICC_WIN95_CLASSES,
-    INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO, LVM_HITTEST,
+    INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
     LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT,
     LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
     LVS_REPORT, LVS_SINGLESEL, NMLISTVIEW, NMLVDISPINFOW, NM_RCLICK, NMHDR, SB_SETPARTS,
-    SB_SETTEXTW, STATUSCLASSNAMEW, TOOLTIPS_CLASSW, TTDT_AUTOPOP, TTF_ABSOLUTE, TTF_IDISHWND,
-    TTF_TRACK, TTTOOLINFOW, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
-    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOANIMATE, TTS_NOFADE, TTS_NOPREFIX,
-    WC_LISTVIEWW, WM_MOUSELEAVE,
+    SB_SETTEXTW, STATUSCLASSNAMEW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_ESCAPE, VK_F3, VK_RETURN,
+    GetFocus, ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_F3, VK_RETURN,
 };
 use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
@@ -70,10 +66,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SIZE, WM_TIMER,
-    WM_VSCROLL, WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SIZE, WM_TIMER,
+    WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WM_SETFONT, ACCEL,
     ACCEL_VIRT_FLAGS,
 };
@@ -145,18 +141,6 @@ const WM_APP_RESULTS_REPAINT: u32 = 0x8000 + 4;
 /// Subclass identifiers of the two find-bar edit controls.
 const SUBCLASS_FIND_EDIT: usize = 1;
 const SUBCLASS_REPLACE_EDIT: usize = 2;
-/// Subclass identifier of the results list, which drives the hover tip.
-const SUBCLASS_RESULTS_LIST: usize = 3;
-/// Reference DPI at which pixel constants below are expressed.
-const BASE_DPI: i32 = 96;
-/// Maximum width of a hover tip before long messages wrap, in 96-DPI pixels.
-const RESULTS_TIP_MAX_WIDTH: i32 = 640;
-/// Offset of the hover tip from the pointer, in 96-DPI pixels.
-const RESULTS_TIP_OFFSET: i32 = 16;
-/// How long a hovered tip stays visible while the pointer is still.
-const RESULTS_TIP_DURATION_MS: isize = 60_000;
-/// Dwell time before a hover tip appears, so sweeping over rows stays quiet.
-const RESULTS_TIP_DELAY_MS: u32 = 400;
 
 /// Column headers and widths of the search-hit table.
 const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Text", 400)];
@@ -296,17 +280,6 @@ struct App {
     text_data: Option<SharedViewData>,
     hex: Option<ViewWindow>,
     results_list: Option<HWND>,
-    /// Tracked tooltip that reveals a truncated problem message on hover.
-    results_tip: Option<HWND>,
-    /// UTF-16 buffer owned by [`App`] because a tracked tooltip keeps the
-    /// text pointer instead of copying it.
-    tip_text: Vec<u16>,
-    /// Row index the tip currently describes, if one is visible.
-    tip_row: Option<usize>,
-    /// Row waiting for the dwell timer before its tip is shown.
-    tip_pending_row: Option<usize>,
-    /// True once mouse-leave tracking is armed for the results list.
-    tip_tracking: bool,
     /// Set while the results list is reparented into a floating frame.
     float_frame: Option<HWND>,
     results_mode: ResultsMode,
@@ -353,11 +326,6 @@ impl Default for App {
             text_data: None,
             hex: None,
             results_list: None,
-            results_tip: None,
-            tip_text: Vec::new(),
-            tip_row: None,
-            tip_pending_row: None,
-            tip_tracking: false,
             float_frame: None,
             results_mode: ResultsMode::Hits,
             problems: Vec::new(),
@@ -603,25 +571,10 @@ impl App {
                 Some(LPARAM(LIST_VIEW_EX_STYLE as isize)),
             );
         }
-        // A tracked tooltip reveals the full problem message that the fixed
-        // Message column width truncates.  The built-in LVS_EX_INFOTIP style
-        // cannot be used here: report-view owner-data lists only raise
-        // LVN_GETINFOTIP for subitem 0, never for the message column.
-        unsafe {
-            // SAFETY: `refdata` carries the owning top-level window so the
-            // subclass callback can reach the App state.
-            let _ = SetWindowSubclass(
-                list,
-                Some(results_list_proc),
-                SUBCLASS_RESULTS_LIST,
-                self.hwnd.0 as usize,
-            );
-        }
         show_window(list, false);
         self.results_list = Some(list);
         self.results_mode = ResultsMode::Hits;
         self.fit_results_last_column(ResultsMode::Hits);
-        self.ensure_results_tip(list);
         Some(list)
     }
 
@@ -711,7 +664,6 @@ impl App {
         self.results_mode = mode;
         if let Some(list) = self.results_list {
             self.configure_results_columns(list, mode);
-            self.hide_results_tip(list);
         }
         self.refresh_results_count();
     }
@@ -740,31 +692,6 @@ impl App {
         self.refresh_results_count();
     }
 
-    /// Full text of one row, used by the hover info tip.
-    fn full_results_text(&self, index: usize) -> String {
-        match self.results_mode {
-            ResultsMode::Hits => {
-                let Some(row) = self.session.results.row(index) else {
-                    return String::new();
-                };
-                let preview = self.hit_preview_text(index);
-                if preview.is_empty() {
-                    format!("Ln {}, Col {}", row.line, row.column)
-                } else {
-                    format!("Ln {}, Col {}\n{preview}", row.line, row.column)
-                }
-            }
-            ResultsMode::Problems => self
-                .problems
-                .get(index)
-                .map(|problem| match &problem.hint {
-                    Some(hint) => format!("{} — {hint}", problem.message),
-                    None => problem.message.clone(),
-                })
-                .unwrap_or_default(),
-        }
-    }
-
     /// Line preview shown in the Text column for one hit.
     fn hit_preview_text(&self, index: usize) -> String {
         let Some(hit) = self.session.results.hit(index) else {
@@ -789,252 +716,6 @@ impl App {
             ResultsMode::Hits => self.session.results.len(),
             ResultsMode::Problems => self.problems.len(),
         }
-    }
-
-    /// Creates the tracked tooltip used for hovered problem rows.
-    fn ensure_results_tip(&mut self, list: HWND) -> Option<HWND> {
-        if let Some(tip) = self.results_tip {
-            return Some(tip);
-        }
-        let instance = match unsafe { GetModuleHandleW(None) } {
-            Ok(module) => module,
-            Err(err) => {
-                self.status_message = format!("GetModuleHandleW failed: {err}");
-                return None;
-            }
-        };
-        // SAFETY: common controls are initialised and the owner window is live.
-        let tip = unsafe {
-            CreateWindowExW(
-                WS_EX_TOPMOST,
-                TOOLTIPS_CLASSW,
-                w!(""),
-                // Animation and fading make a tip that moves between rows blink
-                // continuously; showing it instantly keeps hover stable.
-                WINDOW_STYLE(
-                    WS_POPUP.0 | TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_NOANIMATE | TTS_NOFADE,
-                ),
-                0,
-                0,
-                0,
-                0,
-                Some(self.hwnd),
-                None,
-                Some(HINSTANCE(instance.0)),
-                None,
-            )
-        };
-        let tip = match tip {
-            Ok(hwnd) => hwnd,
-            Err(err) => {
-                self.status_message = format!("Creating the results tooltip failed: {err}");
-                return None;
-            }
-        };
-        // A tracked tooltip is shown manually, so it needs absolute screen
-        // positioning and a window handle to identify the tool.
-        let mut tool = TTTOOLINFOW {
-            cbSize: size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
-            hwnd: list,
-            uId: list.0 as usize,
-            ..Default::default()
-        };
-        unsafe {
-            let dpi = GetDpiForWindow(self.hwnd);
-            let width = scale_for_dpi(RESULTS_TIP_MAX_WIDTH, dpi);
-            SendMessageW(
-                tip,
-                TTM_SETMAXTIPWIDTH,
-                Some(WPARAM(0)),
-                Some(LPARAM(width as isize)),
-            );
-            // Tracked tips are shown on demand; keep them readable instead of
-            // letting the default auto-pop timeout hide them mid-sentence.
-            SendMessageW(
-                tip,
-                TTM_SETDELAYTIME,
-                Some(WPARAM(TTDT_AUTOPOP as usize)),
-                Some(LPARAM(RESULTS_TIP_DURATION_MS)),
-            );
-            let added = SendMessageW(
-                tip,
-                TTM_ADDTOOLW,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
-            );
-            if added.0 == 0 {
-                let _ = DestroyWindow(tip);
-                self.status_message = "Registering the results tooltip failed".to_owned();
-                return None;
-            }
-        }
-        self.results_tip = Some(tip);
-        Some(tip)
-    }
-
-    /// Arms mouse-leave tracking for the results list exactly once.
-    fn track_results_leave(&mut self, list: HWND) {
-        if self.tip_tracking {
-            return;
-        }
-        let mut event = TRACKMOUSEEVENT {
-            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-            dwFlags: TME_LEAVE,
-            hwndTrack: list,
-            dwHoverTime: 0,
-        };
-        // SAFETY: the list window is live and owns no conflicting tracking.
-        if unsafe { TrackMouseEvent(&mut event) }.is_ok() {
-            self.tip_tracking = true;
-        }
-    }
-
-    /// Updates the hover tip for the row under the pointer.
-    fn update_results_tip(&mut self, list: HWND, x: i32, y: i32) {
-        self.track_results_leave(list);
-        let mut hit = LVHITTESTINFO {
-            pt: POINT { x, y },
-            ..Default::default()
-        };
-        // SAFETY: the list is live and the LVHITTESTINFO outlives the message.
-        let index = unsafe {
-            SendMessageW(
-                list,
-                LVM_HITTEST,
-                None,
-                Some(LPARAM(&mut hit as *mut LVHITTESTINFO as isize)),
-            )
-        }
-        .0;
-        let Ok(index) = i32::try_from(index) else {
-            self.hide_results_tip(list);
-            return;
-        };
-        // LVM_HITTEST reports -1 when the pointer is not over an item.
-        if index < 0 {
-            self.hide_results_tip(list);
-            return;
-        }
-        let row = index as usize;
-        if self.tip_row == Some(row) {
-            return;
-        }
-        let text = self.full_results_text(row);
-        if text.is_empty() {
-            self.hide_results_tip(list);
-            return;
-        }
-        // Only arm the tip once the pointer rests: showing it on every row
-        // change makes the popup blink while the pointer sweeps the table.
-        if self.tip_pending_row == Some(row) {
-            return;
-        }
-        self.hide_results_tip(list);
-        self.tip_pending_row = Some(row);
-        // SAFETY: the window is live; the one-shot timer is cancelled as soon
-        // as it fires or another row is hovered.
-        unsafe {
-            let _ = SetTimer(Some(self.hwnd), TIMER_TIP, RESULTS_TIP_DELAY_MS, None);
-        }
-    }
-
-    /// Shows the tip for the row the pointer has been resting on.
-    fn show_pending_tip(&mut self) {
-        // SAFETY: killing a timer that already fired is harmless.
-        let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_TIP) };
-        let Some(row) = self.tip_pending_row.take() else {
-            return;
-        };
-        let Some(list) = self.results_list else {
-            return;
-        };
-        let text = self.full_results_text(row);
-        if !text.is_empty() {
-            self.show_results_tip(list, row, &text);
-        }
-    }
-
-    /// Drops a pending hover tip before its delay elapsed.
-    fn cancel_pending_tip(&mut self) {
-        if self.tip_pending_row.take().is_some() {
-            // SAFETY: killing an armed timer is always allowed.
-            let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_TIP) };
-        }
-    }
-
-    /// Activates the tip next to the pointer for one row.
-    fn show_results_tip(&mut self, list: HWND, row: usize, text: &str) {
-        let Some(tip) = self.results_tip else {
-            return;
-        };
-        // Re-track from scratch so the popup is sized for the new text; with
-        // animation disabled this swap is instantaneous instead of a blink.
-        self.hide_results_tip(list);
-        let mut wide = to_wide(text);
-        let mut tool = TTTOOLINFOW {
-            cbSize: size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
-            hwnd: list,
-            uId: list.0 as usize,
-            lpszText: PWSTR(wide.as_mut_ptr()),
-            ..Default::default()
-        };
-        let mut point = POINT::default();
-        // SAFETY: the POINT is local and valid for the call.
-        if unsafe { GetCursorPos(&mut point) }.is_err() {
-            return;
-        }
-        let offset = scale_for_dpi(RESULTS_TIP_OFFSET, unsafe { GetDpiForWindow(self.hwnd) });
-        let position = LPARAM((((point.y + offset) as isize) << 16) | ((point.x + offset) as isize & 0xFFFF));
-        // SAFETY: the tooltip is live and the text buffer is stored in `self`
-        // before it can be read asynchronously during painting.
-        unsafe {
-            SendMessageW(
-                tip,
-                TTM_UPDATETIPTEXTW,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
-            );
-            SendMessageW(tip, TTM_TRACKPOSITION, Some(WPARAM(0)), Some(position));
-            SendMessageW(
-                tip,
-                TTM_TRACKACTIVATE,
-                Some(WPARAM(1)),
-                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
-            );
-        }
-        // The tooltip keeps the pointer rather than copying the text.
-        self.tip_text = wide;
-        self.tip_row = Some(row);
-    }
-
-    /// Deactivates the tip without destroying the tooltip window.
-    fn hide_results_tip(&mut self, list: HWND) {
-        self.cancel_pending_tip();
-        let Some(tip) = self.results_tip else {
-            return;
-        };
-        if self.tip_row.is_none() {
-            return;
-        }
-        let mut tool = TTTOOLINFOW {
-            cbSize: size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE,
-            hwnd: list,
-            uId: list.0 as usize,
-            ..Default::default()
-        };
-        // SAFETY: deactivating an active tracked tooltip is always allowed.
-        unsafe {
-            SendMessageW(
-                tip,
-                TTM_TRACKACTIVATE,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
-            );
-        }
-        self.tip_row = None;
     }
 
     fn ensure_status_bar(&mut self) -> Option<HWND> {
@@ -3787,11 +3468,6 @@ impl App {
                 let _ = DestroyWindow(list);
             }
         }
-        if let Some(tip) = self.results_tip.take() {
-            unsafe {
-                let _ = DestroyWindow(tip);
-            }
-        }
         if let Some(font) = self.status_font.take() {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(font.0));
@@ -3989,10 +3665,10 @@ fn decode_span(document: &Document, range: std::ops::Range<u64>) -> String {
 /// Queues at most one results repaint when a display request is dropped.
 ///
 /// Owner-data list views ask for cell text synchronously while painting.  A
-/// paint started from inside [`with_app`] (tooltip tracking, focus changes on
-/// navigation) is re-entrant, so the request is discarded and the control
-/// keeps the blank cell.  Re-posting a paint request once per cycle lets the
-/// list ask again outside the guard and restore the text.
+/// paint started from inside [`with_app`] (focus changes on navigation) is
+/// re-entrant, so the request is discarded and the control keeps the blank
+/// cell.  Re-posting a paint request once per cycle lets the list ask again
+/// outside the guard and restore the text.
 fn request_results_repaint(hwnd: HWND, lparam: LPARAM) {
     let header = lparam.0 as *const NMHDR;
     if header.is_null() {
@@ -4373,39 +4049,6 @@ fn pick_file(hwnd: HWND, save: bool, initial: Option<&Path>) -> Option<PathBuf> 
     Some(PathBuf::from(OsString::from_wide(&buffer[..end])))
 }
 
-unsafe extern "system" fn results_list_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _subclass: usize,
-    refdata: usize,
-) -> LRESULT {
-    // `refdata` carries the owning top-level window because reparenting the
-    // list into the floating frame changes its parent.
-    let owner = HWND(refdata as *mut core::ffi::c_void);
-    match message {
-        WM_MOUSEMOVE => {
-            with_app(owner, |app| {
-                app.update_results_tip(hwnd, lparam_x(lparam), lparam_y(lparam));
-            });
-        }
-        WM_MOUSELEAVE => {
-            with_app(owner, |app| {
-                app.tip_tracking = false;
-                app.hide_results_tip(hwnd);
-            });
-        }
-        // Any click, wheel scroll or key press invalidates the hovered row.
-        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL | WM_VSCROLL | WM_KEYDOWN => {
-            with_app(owner, |app| app.hide_results_tip(hwnd));
-        }
-        _ => {}
-    }
-    // SAFETY: forwarding to the original list-view procedure.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
-}
-
 unsafe extern "system" fn find_edit_proc(
     hwnd: HWND,
     message: u32,
@@ -4519,15 +4162,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_TIMER => {
-            if wparam.0 == TIMER_TIP {
-                with_app(hwnd, App::show_pending_tip);
-            } else {
-                with_app(hwnd, |app| {
-                    app.poll_job();
-                    app.poll_watcher();
-                    app.update_status();
-                });
-            }
+            with_app(hwnd, |app| {
+                app.poll_job();
+                app.poll_watcher();
+                app.update_status();
+            });
             LRESULT(0)
         }
         WM_APP_FLOAT_RESIZE => {
@@ -4621,11 +4260,6 @@ fn lparam_x(lparam: LPARAM) -> i32 {
 /// Signed y coordinate of a client-area mouse message.
 fn lparam_y(lparam: LPARAM) -> i32 {
     ((lparam.0 >> 16) & 0xFFFF) as i16 as i32
-}
-
-/// Scales a value expressed at [`BASE_DPI`] to the window's DPI.
-fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
-    (value * dpi as i32 + BASE_DPI / 2) / BASE_DPI
 }
 
 fn with_app_result<R>(hwnd: HWND, visit: impl FnOnce(&mut App) -> R) -> Option<R> {

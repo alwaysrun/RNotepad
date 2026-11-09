@@ -156,8 +156,6 @@ pub const SPLIT_GAP: i32 = 4;
 pub const TIMER_REFRESH: usize = 1;
 /// Refresh interval in milliseconds.
 pub const TIMER_INTERVAL_MS: u32 = 250;
-/// One-shot timer that reveals the results hover tip once the pointer rests.
-pub const TIMER_TIP: usize = 2;
 /// Ratio of the text pane in split layouts.
 pub const TEXT_SPLIT_RATIO: f32 = 0.62;
 /// Number of status fields.
