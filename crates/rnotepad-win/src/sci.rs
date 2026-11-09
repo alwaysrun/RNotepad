@@ -263,6 +263,23 @@ impl Scintilla {
         self.send(SCI_GETCURRENTPOS, 0, 0).max(0) as usize
     }
 
+    /// One-based line and character column of a UTF-8 offset.
+    ///
+    /// The editor buffer is authoritative here: a coordinate map built when
+    /// the document was loaded no longer matches the buffer after an edit.
+    #[must_use]
+    pub fn line_column(&self, position: usize) -> (u32, u32) {
+        let line = self.send(SCI_LINEFROMPOSITION, position, 0).max(0) as usize;
+        let line_start = self.send(SCI_POSITIONFROMLINE, line, 0).max(0) as usize;
+        let column = self
+            .send(SCI_COUNTCHARACTERS, line_start, position as isize)
+            .max(0) as usize;
+        (
+            u32::try_from(line).unwrap_or(u32::MAX).saturating_add(1),
+            u32::try_from(column).unwrap_or(u32::MAX).saturating_add(1),
+        )
+    }
+
     /// Moves the caret and scrolls it into view.
     pub fn goto_position(&self, position: usize) {
         let position = position.min(INT_MAX_POS);

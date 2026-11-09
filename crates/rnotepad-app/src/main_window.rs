@@ -34,8 +34,8 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, BST_CHECKED, EM_SETSEL, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
-    ICC_WIN95_CLASSES,
+    GetComboBoxInfo, InitCommonControlsEx, BST_CHECKED, COMBOBOXINFO, EM_SETSEL, ICC_BAR_CLASSES,
+    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES,
     INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
     LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT,
     LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
@@ -50,15 +50,17 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CheckMenuItem,
+    AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_RESETCONTENT,
+    CB_SETDROPPEDWIDTH, CBS_AUTOHSCROLL, CBS_DROPDOWN, CheckMenuItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, EnableMenuItem, ES_AUTOHSCROLL, FCONTROL, FVIRTKEY, GetClientRect,
+    DispatchMessageW, DrawMenuBar, EnableMenuItem, ES_AUTOHSCROLL, FCONTROL, FVIRTKEY, GA_ROOT,
+    GetAncestor, GetClientRect,
     GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW,
     GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENS,
     IDC_SIZEWE, IDNO,
-    IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON2, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
+    IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK,
     MB_YESNOCANCEL, MB_YESNO, MENU_ITEM_FLAGS,
     MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
@@ -69,10 +71,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SIZE, WM_TIMER,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETTEXT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
     WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WM_SETFONT, ACCEL,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL, WM_SETFONT, ACCEL,
     ACCEL_VIRT_FLAGS,
 };
 
@@ -100,6 +102,7 @@ use rnotepad_win::view::{
 
 use crate::commands::*;
 use crate::recent::{RecentFiles, RECENT_LIMIT};
+use crate::search_history::{SearchHistory, SEARCH_HISTORY_LIMIT};
 use crate::session::{Session, ViewLayout};
 use crate::tasks::SearchJob;
 
@@ -296,7 +299,11 @@ impl ChangeState {
 }
 
 struct FindBar {
+    /// Editable combo box holding the pattern; its drop list shows the
+    /// recent-search history.
     edit: HWND,
+    /// Edit child of `edit`, which receives keystrokes and focus.
+    input: HWND,
     replace: HWND,
     next: HWND,
     all: HWND,
@@ -353,6 +360,11 @@ struct App {
     change_state: ChangeState,
     /// Recently opened files shown in the File menu.
     recent: RecentFiles,
+    /// Recently used search patterns shown in the find-bar dropdown.
+    history: SearchHistory,
+    /// Selection range last copied into the find field.  A repeated Ctrl+F
+    /// with the same selection must not overwrite a freshly typed pattern.
+    last_find_seed: Option<(usize, usize)>,
     /// Guards against text/hex link feedback loops.
     syncing: bool,
     /// Last text selection applied to the hex view, so Scintilla's deferred
@@ -399,6 +411,8 @@ impl Default for App {
             reported_disk_state: None,
             change_state: ChangeState::Clean,
             recent: RecentFiles::default(),
+            history: SearchHistory::default(),
+            last_find_seed: None,
             syncing: false,
             last_text_selection: None,
             follow_tail: false,
@@ -494,12 +508,16 @@ impl App {
         if self.find.is_some() {
             return;
         }
-        let edit = match create_child(self.hwnd, w!("EDIT"), EDIT_STYLE, ID_FIND_EDIT) {
+        let edit = match create_child(self.hwnd, w!("COMBOBOX"), FIND_PATTERN_STYLE, ID_FIND_EDIT) {
             Ok(hwnd) => hwnd,
             Err(err) => {
                 self.status_message = err;
                 return;
             }
+        };
+        let Some(input) = combo_edit_handle(edit) else {
+            self.status_message = "Creating the pattern field failed".to_owned();
+            return;
         };
         let replace = match create_child(self.hwnd, w!("EDIT"), EDIT_STYLE, ID_FIND_REPLACE_EDIT) {
             Ok(hwnd) => hwnd,
@@ -543,7 +561,7 @@ impl App {
             // Return searches from the pattern field and replaces from the
             // replacement field; Escape closes the bar from either field.
             let _ = SetWindowSubclass(
-                edit,
+                input,
                 Some(find_edit_proc),
                 SUBCLASS_FIND_EDIT,
                 ID_FIND_NEXT_BUTTON as usize,
@@ -557,6 +575,7 @@ impl App {
         }
         let bar = FindBar {
             edit,
+            input,
             replace,
             next,
             all,
@@ -569,6 +588,7 @@ impl App {
         };
         show_bar(&bar, false);
         self.find = Some(bar);
+        self.refresh_find_history();
     }
 
     fn ensure_results_list(&mut self) -> Option<HWND> {
@@ -1137,7 +1157,17 @@ impl App {
             - FIND_ROW_GAP * 5)
             .max(0);
         let edit_width = available;
-        move_control(bar.edit, FIND_ROW_GAP, row_one, edit_width, FIND_ROW_HEIGHT);
+        // The combo height covers its closed field plus the drop list; the
+        // list height is what caps the history panel.
+        move_control(bar.edit, FIND_ROW_GAP, row_one, edit_width, FIND_DROPDOWN_HEIGHT);
+        unsafe {
+            let _ = SendMessageW(
+                bar.edit,
+                CB_SETDROPPEDWIDTH,
+                Some(WPARAM(edit_width.max(0) as usize)),
+                None,
+            );
+        }
         let x = FIND_ROW_GAP + edit_width + FIND_ROW_GAP;
         move_control(bar.next, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
@@ -1760,7 +1790,9 @@ impl App {
     ///
     /// This is the second line of defence required by the specification: the
     /// menus grey out unavailable items, but a stale menu or an accelerator
-    /// must not be able to modify a read-only or hex document.
+    /// must not be able to modify a read-only or hex document.  "Enable
+    /// Editing" is part of that contract, so a document the user switched to
+    /// read-only rejects Format, EOL, BOM and encoding changes as well.
     fn writable_text(&self) -> bool {
         let state = self
             .session
@@ -1772,6 +1804,7 @@ impl App {
             ));
         let (kind, view, text_available) = state;
         kind.is_editable()
+            && self.editing
             && view == ViewMode::Text
             && text_available
             && matches!(self.text, Some(TextHandle::Scintilla(_)))
@@ -1905,6 +1938,10 @@ impl App {
     }
 
     fn format_json(&mut self, minify: bool) {
+        if !self.writable_text() {
+            self.write_blocked(if minify { "Minify JSON" } else { "Format JSON" });
+            return;
+        }
         let text = match &self.text {
             Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
             _ => None,
@@ -2043,42 +2080,107 @@ impl App {
         }
     }
 
-    /// Selected text that may seed the find field, when it is a single line.
+    /// Selected text that may seed the find field, with the range it came from.
     ///
-    /// Multi-line and whitespace-only selections are rejected: the find field
-    /// is a single-line edit control, and a blank pattern would only produce
-    /// confusing match feedback.
-    fn selection_for_find(&self) -> Option<String> {
-        let Some(TextHandle::Scintilla(control)) = &self.text else {
-            return None;
+    /// Only the first non-blank line is used: the find field is a single-line
+    /// edit control, while a whole-line selection includes the line break at
+    /// its end, which would never match as a literal pattern.
+    fn selection_for_find(&self) -> Option<((usize, usize), String)> {
+        let (range, text) = match &self.text {
+            Some(TextHandle::Scintilla(control)) => {
+                let (start, end) = control.selection();
+                if start >= end {
+                    return None;
+                }
+                ((start, end), control.text_range(start, end))
+            }
+            Some(TextHandle::Large(_)) => {
+                let selection = self
+                    .text_data
+                    .as_ref()
+                    .and_then(|data| data.try_borrow().ok().and_then(|view| view.sel.clone()))?;
+                let start = usize::try_from(selection.start).ok()?;
+                let end = usize::try_from(selection.end).ok()?;
+                let text = self.render_text_selection(&selection);
+                ((start, end), text)
+            }
+            None => return None,
         };
-        let (start, end) = control.selection();
-        if start >= end {
-            return None;
-        }
-        let text = control.text_range(start, end);
-        if text.contains('\r') || text.contains('\n') || text.trim().is_empty() {
-            return None;
-        }
-        Some(text)
+        let pattern = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+        Some((range, pattern.to_owned()))
     }
 
     /// Seeds the find field with the current selection when it is usable.
     ///
-    /// Without a usable selection the field keeps whatever the user typed, so
-    /// pressing Ctrl+F twice never destroys an existing pattern.
+    /// The field is only left untouched when the selection has not changed
+    /// since the previous seed and already holds a pattern, so a repeated
+    /// Ctrl+F keeps freshly typed text while any new selection still seeds.
     fn prefill_find_pattern(&mut self) {
-        let Some(pattern) = self.selection_for_find() else {
+        let Some((range, pattern)) = self.selection_for_find() else {
             return;
         };
         let Some(bar) = self.find.as_ref() else {
             return;
         };
+        let already_seeded = self.last_find_seed == Some(range)
+            && read_edit(bar.edit).is_some_and(|text| !text.is_empty());
+        if already_seeded {
+            return;
+        }
+        self.last_find_seed = Some(range);
         set_text(bar.edit, &pattern);
         // Selecting the seeded text lets the user either type a fresh pattern
         // or press Enter immediately to search for it.
         unsafe {
-            let _ = SendMessageW(bar.edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            let _ = SendMessageW(bar.input, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+    }
+
+    /// Adds a pattern to the persistent recent-search list.
+    fn remember_search(&mut self, pattern: &str) {
+        if self.history.record(pattern) {
+            self.refresh_find_history();
+        }
+    }
+
+    /// Rebuilds the pattern dropdown from the persisted history.
+    ///
+    /// `CB_RESETCONTENT` also empties the edit field of an editable combo, so
+    /// the pattern currently in the field is saved and restored; a search must
+    /// never lose what the user typed unless the user deletes it.
+    fn refresh_find_history(&mut self) {
+        let Some(bar) = self.find.as_ref() else {
+            return;
+        };
+        let current = read_edit(bar.edit).unwrap_or_default();
+        unsafe {
+            let _ = SendMessageW(bar.edit, CB_RESETCONTENT, None, None);
+            for pattern in self.history.patterns().iter().take(SEARCH_HISTORY_LIMIT) {
+                let wide = to_wide(pattern);
+                let _ = SendMessageW(
+                    bar.edit,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide.as_ptr() as isize)),
+                );
+            }
+            if !current.is_empty() {
+                // WM_SETTEXT fills the embedded edit without touching the list.
+                let wide = to_wide(&current);
+                let _ = SendMessageW(
+                    bar.edit,
+                    WM_SETTEXT,
+                    None,
+                    Some(LPARAM(wide.as_ptr() as isize)),
+                );
+                // Leave the caret after the restored pattern, ready for editing.
+                let _ = SendMessageW(
+                    bar.input,
+                    EM_SETSEL,
+                    Some(WPARAM(usize::MAX)),
+                    Some(LPARAM(-1)),
+                );
+            }
         }
     }
 
@@ -2153,6 +2255,7 @@ impl App {
             return;
         };
         let case = self.find_case_sensitive();
+        self.remember_search(&pattern);
         let found = if let Some(TextHandle::Scintilla(control)) = &self.text {
             let (_, end) = control.selection();
             let from = if end == 0 { 0 } else { end };
@@ -2197,6 +2300,7 @@ impl App {
         let Some(shared) = self.session.doc.clone() else {
             return;
         };
+        self.remember_search(&pattern);
         self.cancel_search();
         let (doc_id, revision) = {
             let guard = shared
@@ -2505,9 +2609,9 @@ impl App {
 
     /// Moves the active view to one hit.
     ///
-    /// `select_match` selects the whole match (Find Next, context-menu jumps);
-    /// when false the caret is parked at the hit start instead, which is what
-    /// double-clicking a results row should do.
+    /// `select_match` selects the whole match (Find Next, context-menu jumps,
+    /// double-clicking a results row); when false the caret is parked at the
+    /// hit start instead.
     fn navigate_to(&mut self, hit: &MatchHit, select_match: bool) {
         let Some(shared) = self.session.doc.clone() else {
             return;
@@ -2690,8 +2794,9 @@ impl App {
     fn focused_find_edit(&self) -> Option<HWND> {
         let focus = unsafe { GetFocus() };
         let bar = self.find.as_ref()?;
-        if focus == bar.edit {
-            Some(bar.edit)
+        // The pattern combo forwards focus to its embedded edit child.
+        if focus == bar.input || focus == bar.edit {
+            Some(bar.input)
         } else if focus == bar.replace {
             Some(bar.replace)
         } else {
@@ -3089,33 +3194,29 @@ impl App {
 
     /// Confirms leaving the application.
     ///
-    /// Besides unsaved edits, a newer disk revision must be surfaced as well:
-    /// exiting must never hide that the file on disk no longer matches the
-    /// revision the editor loaded.  Read-only documents skip the external
-    /// check because they hold no local state and change continuously when
-    /// they are live logs.
+    /// Only unsaved edits need a prompt: exiting without them leaves the disk
+    /// copy untouched, so a newer disk revision is not a reason to interrupt
+    /// the user.  When local edits do exist, a newer disk revision must be
+    /// surfaced as well, because saving would otherwise overwrite it silently.
     fn confirm_exit(&mut self) -> bool {
-        if !self.session.has_document() {
+        if !self.session.has_document() || !self.is_dirty() {
             return true;
         }
-        let dirty = self.is_dirty();
         let external = self.external_change_pending();
+        if !external {
+            return self.confirm_transition();
+        }
         // A watcher notification may still be queued when the window closes,
         // so the title indicator is refreshed from the metadata comparison
         // before the user decides.
-        if external && !self.external_change {
+        if !self.external_change {
             if let Some(state) = self.disk_state() {
                 self.mark_external_change(state);
             }
             self.status_message = EXTERNAL_CHANGE_HINT.to_owned();
             self.update_status();
         }
-        match (dirty, external) {
-            (false, false) => true,
-            (true, false) => self.confirm_transition(),
-            (false, true) => self.confirm_exit_external_only(),
-            (true, true) => self.confirm_exit_both(),
-        }
+        self.confirm_exit_both()
     }
 
     /// `true` when the editable document has a newer revision on disk.
@@ -3125,27 +3226,6 @@ impl App {
             .read(|doc| doc.kind.is_editable() && doc.path.is_some())
             .unwrap_or(false);
         editable && (self.external_change || self.file_changed_on_disk())
-    }
-
-    /// Exit prompt when only the disk copy changed: nothing is lost, but the
-    /// user must know that the editor no longer shows the newest revision.
-    fn confirm_exit_external_only(&self) -> bool {
-        let name = self.document_name();
-        let message = format!(
-            "{name} has changed on disk since it was opened.\n\n\
-             There are no unsaved edits.\n\n\
-             Yes: exit now (the disk file is kept as it is)\n\
-             No: stay open (use File > Reload to load the disk copy)"
-        );
-        let answer = unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                PCWSTR(to_wide(&message).as_ptr()),
-                PCWSTR(to_wide(EXIT_CAPTION).as_ptr()),
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-            )
-        };
-        answer == IDYES
     }
 
     /// Exit prompt when both sides changed, so saving cannot overwrite the
@@ -3225,9 +3305,7 @@ impl App {
                 } else {
                     None
                 };
-                let line_col = raw
-                    .and_then(|raw| guard.coord.raw_to_view(raw))
-                    .map(|view| (view.line.saturating_add(1), view.col.saturating_add(1)));
+                let line_col = Some(control.line_column(position));
                 (line_col, selection, raw.map(|raw| raw.0))
             }
             Some(TextHandle::Large(_)) => {
@@ -3345,6 +3423,7 @@ impl App {
         set(ID_BOM_ADD, writable);
         set(ID_BOM_STRIP, writable);
         set(ID_FORMAT_JSON, writable);
+        set(ID_FORMAT_MINIFY, writable);
         for (id, _) in CHARSET_MENU_ITEMS {
             set(id, has_doc);
         }
@@ -3670,9 +3749,9 @@ impl App {
                     ResultsMode::Hits => {
                         self.hit_cursor = index.saturating_add(1);
                         if let Some(hit) = self.session.results.hit(index).copied() {
-                            // A double-click lands the caret on the hit itself
-                            // so editing can start at the exact column.
-                            self.navigate_to(&hit, false);
+                            // A double-click returns focus to the text view and
+                            // selects the whole match, ready for editing.
+                            self.navigate_to(&hit, true);
                         }
                     }
                     ResultsMode::Problems => {
@@ -3743,6 +3822,16 @@ impl App {
 
 const EDIT_STYLE: WINDOW_STYLE =
     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32);
+/// Editable combo box with a drop list and a scrollbar for long histories.
+const FIND_PATTERN_STYLE: WINDOW_STYLE = WINDOW_STYLE(
+    WS_CHILD.0
+        | WS_VISIBLE.0
+        | WS_TABSTOP.0
+        | WS_BORDER.0
+        | WS_VSCROLL.0
+        | CBS_DROPDOWN as u32
+        | CBS_AUTOHSCROLL as u32,
+);
 const PUSH_BUTTON_STYLE: WINDOW_STYLE =
     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32);
 const CHECKBOX_STYLE: WINDOW_STYLE =
@@ -3994,6 +4083,16 @@ fn set_text(hwnd: HWND, text: &str) {
     unsafe {
         let _ = SetWindowTextW(hwnd, PCWSTR(to_wide(text).as_ptr()));
     }
+}
+
+/// Returns the edit control embedded in an editable combo box.
+fn combo_edit_handle(combo: HWND) -> Option<HWND> {
+    let mut info = COMBOBOXINFO {
+        cbSize: u32::try_from(size_of::<COMBOBOXINFO>()).ok()?,
+        ..Default::default()
+    };
+    let _ = unsafe { GetComboBoxInfo(combo, &mut info) };
+    (!info.hwndItem.is_invalid()).then_some(info.hwndItem)
 }
 
 fn to_wide(text: &str) -> Vec<u16> {
@@ -4330,10 +4429,13 @@ unsafe extern "system" fn find_edit_proc(
             None
         };
         if let Some(command) = command {
-            if let Ok(parent) = unsafe { GetParent(hwnd) } {
+            // The pattern field is the embedded edit of a combo box, so the
+            // owning window is the top-level window, not the direct parent.
+            let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+            if !root.is_invalid() {
                 unsafe {
                     let _ = PostMessageW(
-                        Some(parent),
+                        Some(root),
                         WM_COMMAND,
                         WPARAM(command),
                         LPARAM(0),
@@ -4575,6 +4677,7 @@ pub fn run() -> Result<(), String> {
     let mut app = Box::<App>::default();
     app.icons = icons;
     app.recent = recent;
+    app.history = SearchHistory::load();
     let app = Box::into_raw(app);
     // SAFETY: the pointer is handed to the window; WM_NCCREATE stores it and
     // WM_NCDESTROY reclaims it.

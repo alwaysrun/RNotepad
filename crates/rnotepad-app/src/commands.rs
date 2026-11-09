@@ -168,6 +168,14 @@ pub const FIND_CANCEL_WIDTH: i32 = 64;
 pub const FIND_BUTTON_WIDTH: i32 = 80;
 /// Width of the case-sensitive checkbox.
 pub const FIND_CASE_WIDTH: i32 = 56;
+/// Height of one row in the pattern dropdown list.
+pub const FIND_DROPDOWN_ROW_HEIGHT: i32 = 20;
+/// Rows the pattern dropdown shows before it scrolls.
+pub const FIND_DROPDOWN_ROWS: i32 = 8;
+/// Height passed to the pattern combo box: the closed field plus the drop
+/// list, which is capped so a long history never covers the whole screen.
+pub const FIND_DROPDOWN_HEIGHT: i32 =
+    FIND_ROW_HEIGHT + FIND_DROPDOWN_ROWS * FIND_DROPDOWN_ROW_HEIGHT;
 /// Width of the find-bar close button.
 pub const FIND_CLOSE_WIDTH: i32 = 28;
 /// Default size of the floating results frame.

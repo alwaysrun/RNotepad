@@ -11,6 +11,7 @@
 mod commands;
 mod main_window;
 mod recent;
+mod search_history;
 mod session;
 mod tasks;
 

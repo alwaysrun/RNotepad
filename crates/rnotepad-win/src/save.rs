@@ -8,6 +8,7 @@
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rnotepad_core::document::{Document, DocumentKind, ViewMode};
 use rnotepad_core::encoding::{encode, BomPolicy, BomState, Charset, UnmappableChar};
@@ -17,6 +18,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
 const TEMP_SUFFIX: &str = "rnotepad.tmp";
+/// Distinguishes temporary files written by this process.
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const BACKUP_SUFFIX: &str = ".bak";
 const BOM_UTF8: BomState = BomState::Utf8;
 
@@ -66,7 +69,11 @@ pub fn save_document(doc: &mut Document, request: &SaveRequest<'_>) -> Result<()
         .or_else(|| doc.path.clone())
         .ok_or(SaveError::NoPath)?;
 
-    if !request.allow_external_overwrite && externally_modified(doc, &target) {
+    // "Save As" targets a file this document never loaded, so its metadata
+    // says nothing about a newer revision.  The file dialog already asks
+    // before an existing file is replaced.
+    let same_path = doc.path.as_deref() == Some(target.as_path());
+    if !request.allow_external_overwrite && same_path && externally_modified(doc, &target) {
         return Err(SaveError::ExternalModified);
     }
 
@@ -166,11 +173,14 @@ fn write_atomically(target: &Path, bytes: &[u8], backup: bool) -> Result<(), Sav
 }
 
 fn temp_path(target: &Path) -> PathBuf {
+    // A process-unique suffix keeps two instances saving the same file from
+    // sharing (and deleting) each other's temporary file.
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let mut name = target
         .file_name()
         .map(|value| value.to_os_string())
         .unwrap_or_default();
-    name.push(".");
+    name.push(format!(".{}.{sequence}.", std::process::id()));
     name.push(TEMP_SUFFIX);
     target.with_file_name(name)
 }
