@@ -341,6 +341,26 @@ impl Document {
         Ok(())
     }
 
+    /// Replaces the in-memory byte stream with content produced by the editor.
+    ///
+    /// The editor text excludes the BOM, so callers re-attach the document's
+    /// current BOM and pass its byte length as `bom_len`.  Charset and write
+    /// policy are preserved and only the interpretation layers derived from
+    /// the bytes are rebuilt, so searches and previews see unsaved edits.
+    pub fn replace_content(&mut self, bytes: Vec<u8>, bom_len: u64) {
+        let charset = self.encoding.charset;
+        self.raw = RawBytes::from_vec(bytes);
+        self.line_index = Arc::new(LineIndex::new(self.raw.clone(), charset, bom_len));
+        self.line_index.scan_step(PRIME_BYTES);
+        self.coord = AnchoredCoordMap::new(
+            self.raw.clone(),
+            charset,
+            bom_len,
+            self.line_index.clone(),
+        );
+        self.bump_revision();
+    }
+
     /// Marks the document as modified and returns the new revision.
     pub fn mark_dirty(&mut self) -> u64 {
         if self.kind.is_editable() {

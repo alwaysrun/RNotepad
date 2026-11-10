@@ -13,6 +13,8 @@ pub const ID_FILE_SAVE: u32 = 1002;
 pub const ID_FILE_SAVE_AS: u32 = 1003;
 /// Reload the current document from disk.
 pub const ID_FILE_RELOAD: u32 = 1005;
+/// Reveal the current document in Explorer.
+pub const ID_FILE_OPEN_FOLDER: u32 = 1006;
 /// Close the current document.
 pub const ID_FILE_CLOSE: u32 = 1004;
 /// Exit the application.
@@ -38,6 +40,12 @@ pub const ID_EDIT_REPLACE: u32 = 1110;
 pub const ID_EDIT_FIND_NEXT: u32 = 1108;
 /// Find every match.
 pub const ID_EDIT_FIND_ALL: u32 = 1109;
+/// Select the whole buffer from the editor context menu.
+pub const ID_EDIT_SELECT_ALL: u32 = 1111;
+/// Remove the selection without copying it.
+pub const ID_EDIT_DELETE: u32 = 1112;
+/// Open the editor context menu, posted by the editor subclass.
+pub const ID_EDIT_CONTEXT_MENU: u32 = 1113;
 
 /// Text view.
 pub const ID_VIEW_TEXT: u32 = 1201;
@@ -141,6 +149,8 @@ pub const ID_FIND_REPLACE_EDIT: u32 = 2007;
 pub const ID_FIND_CANCEL: u32 = 2008;
 /// Replaces the current match.
 pub const ID_FIND_REPLACE_ONE: u32 = 2009;
+/// Wrap-around search checkbox.
+pub const ID_FIND_WRAP: u32 = 2010;
 
 /// Height of the status strip.
 pub const STATUS_HEIGHT: i32 = 24;
@@ -168,6 +178,8 @@ pub const FIND_CANCEL_WIDTH: i32 = 64;
 pub const FIND_BUTTON_WIDTH: i32 = 80;
 /// Width of the case-sensitive checkbox.
 pub const FIND_CASE_WIDTH: i32 = 56;
+/// Width of the wrap-around checkbox.
+pub const FIND_WRAP_WIDTH: i32 = 56;
 /// Height of one row in the pattern dropdown list.
 pub const FIND_DROPDOWN_ROW_HEIGHT: i32 = 20;
 /// Rows the pattern dropdown shows before it scrolls.

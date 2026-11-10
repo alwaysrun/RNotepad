@@ -9,7 +9,9 @@ use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -50,11 +52,12 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_RESETCONTENT,
+    AppendMenuW, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_RESETCONTENT,
     CB_SETDROPPEDWIDTH, CBS_AUTOHSCROLL, CBS_DROPDOWN, CheckMenuItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, EnableMenuItem, ES_AUTOHSCROLL, FCONTROL, FVIRTKEY, GA_ROOT,
+    DispatchMessageW, DrawMenuBar, EnableMenuItem, FCONTROL, FVIRTKEY, GA_ROOT,
     GetAncestor, GetClientRect,
     GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW,
@@ -69,7 +72,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetCursor,
     SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT, WM_DESTROY,
+    WM_DROPFILES, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
     WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETTEXT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
@@ -82,7 +86,7 @@ use rnotepad_core::bytes::ByteSource;
 use rnotepad_core::coord::{CoordMap, RawByteOffset, Utf8Pos};
 use rnotepad_core::document::{Document, DocumentKind, ViewMode};
 use rnotepad_core::eol::{EolKind, EolWritePolicy};
-use rnotepad_core::encoding::{decode, precheck_unmappable, BomPolicy, Charset};
+use rnotepad_core::encoding::{decode, encode, precheck_unmappable, BomPolicy, Charset};
 use rnotepad_core::format::{Diagnostic, FormatOptions, FormatProvider, JsonFormatProvider};
 use rnotepad_core::search::{MatchHit, SearchMode, SearchQuery};
 
@@ -102,7 +106,7 @@ use rnotepad_win::view::{
 
 use crate::commands::*;
 use crate::recent::{RecentFiles, RECENT_LIMIT};
-use crate::search_history::{SearchHistory, SEARCH_HISTORY_LIMIT};
+use crate::search_history::{SearchHistory, REPLACE_STORAGE_FILE, SEARCH_HISTORY_LIMIT};
 use crate::session::{Session, ViewLayout};
 use crate::tasks::SearchJob;
 
@@ -161,6 +165,8 @@ const WM_APP_RESULTS_REPAINT: u32 = 0x8000 + 4;
 /// Subclass identifiers of the two find-bar edit controls.
 const SUBCLASS_FIND_EDIT: usize = 1;
 const SUBCLASS_REPLACE_EDIT: usize = 2;
+/// Subclass identifier of the Scintilla editor, which intercepts right-clicks.
+const SUBCLASS_EDITOR: usize = 3;
 
 /// Column headers and widths of the search-hit table.
 const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Text", 400)];
@@ -192,7 +198,10 @@ const FLOAT_CLASS_NAME: &str = "RNotepadFloatFrame";
 const FLOAT_TITLE: &str = "Results";
 /// Menu items of the results context menu, kept above zero as Win32 requires.
 const ID_RESULTS_SHOW_TEXT: u32 = 3001;
-const ID_RESULTS_SHOW_HEX: u32 = 3002;
+/// Removes every hit from the results panel.
+const ID_RESULTS_CLEAR: u32 = 3002;
+/// Closes the results panel.
+const ID_RESULTS_CLOSE: u32 = 3003;
 /// Charset commands and their menu labels, shared by both menus.
 const CHARSET_MENU_ITEMS: [(u32, &str); 9] = [
     (ID_ENC_UTF8, "UTF-8"),
@@ -304,12 +313,17 @@ struct FindBar {
     edit: HWND,
     /// Edit child of `edit`, which receives keystrokes and focus.
     input: HWND,
+    /// Editable combo box holding the replacement; its drop list shows the
+    /// recent-replacement history.
     replace: HWND,
+    /// Edit child of `replace`, which receives keystrokes and focus.
+    replace_input: HWND,
     next: HWND,
     all: HWND,
     replace_one: HWND,
     replace_all: HWND,
     case: HWND,
+    wrap: HWND,
     close: HWND,
     cancel: HWND,
     visible: bool,
@@ -362,6 +376,8 @@ struct App {
     recent: RecentFiles,
     /// Recently used search patterns shown in the find-bar dropdown.
     history: SearchHistory,
+    /// Recently used replacement text shown in the replace-field dropdown.
+    replace_history: SearchHistory,
     /// Selection range last copied into the find field.  A repeated Ctrl+F
     /// with the same selection must not overwrite a freshly typed pattern.
     last_find_seed: Option<(usize, usize)>,
@@ -412,6 +428,7 @@ impl Default for App {
             change_state: ChangeState::Clean,
             recent: RecentFiles::default(),
             history: SearchHistory::default(),
+            replace_history: SearchHistory::default(),
             last_find_seed: None,
             syncing: false,
             last_text_selection: None,
@@ -519,12 +536,16 @@ impl App {
             self.status_message = "Creating the pattern field failed".to_owned();
             return;
         };
-        let replace = match create_child(self.hwnd, w!("EDIT"), EDIT_STYLE, ID_FIND_REPLACE_EDIT) {
+        let replace = match create_child(self.hwnd, w!("COMBOBOX"), FIND_PATTERN_STYLE, ID_FIND_REPLACE_EDIT) {
             Ok(hwnd) => hwnd,
             Err(err) => {
                 self.status_message = err;
                 return;
             }
+        };
+        let Some(replace_input) = combo_edit_handle(replace) else {
+            self.status_message = "Creating the replacement field failed".to_owned();
+            return;
         };
         let next = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_NEXT_BUTTON);
         let all = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_ALL_BUTTON);
@@ -533,6 +554,7 @@ impl App {
         let replace_all =
             create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_REPLACE_BUTTON);
         let case = create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_CASE);
+        let wrap = create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_WRAP);
         let close = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CLOSE);
         let cancel = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CANCEL);
         let (
@@ -541,9 +563,10 @@ impl App {
             Ok(replace_one),
             Ok(replace_all),
             Ok(case),
+            Ok(wrap),
             Ok(close),
             Ok(cancel),
-        ) = (next, all, replace_one, replace_all, case, close, cancel)
+        ) = (next, all, replace_one, replace_all, case, wrap, close, cancel)
         else {
             self.status_message = "Creating find-bar controls failed".to_owned();
             return;
@@ -555,9 +578,18 @@ impl App {
         set_text(replace_one, "Replace");
         set_text(replace_all, "Replace All");
         set_text(case, "Case");
+        set_text(wrap, "Wrap");
         set_text(close, "X");
         set_text(cancel, "Stop");
         unsafe {
+            // Wrapping is the historical behaviour, so keep it enabled until
+            // the user unchecks the box.
+            let _ = SendMessageW(
+                wrap,
+                BM_SETCHECK,
+                Some(WPARAM(BST_CHECKED.0 as usize)),
+                None,
+            );
             // Return searches from the pattern field and replaces from the
             // replacement field; Escape closes the bar from either field.
             let _ = SetWindowSubclass(
@@ -567,7 +599,7 @@ impl App {
                 ID_FIND_NEXT_BUTTON as usize,
             );
             let _ = SetWindowSubclass(
-                replace,
+                replace_input,
                 Some(find_edit_proc),
                 SUBCLASS_REPLACE_EDIT,
                 ID_FIND_REPLACE_ONE as usize,
@@ -577,11 +609,13 @@ impl App {
             edit,
             input,
             replace,
+            replace_input,
             next,
             all,
             replace_one,
             replace_all,
             case,
+            wrap,
             close,
             cancel,
             visible: false,
@@ -589,6 +623,7 @@ impl App {
         show_bar(&bar, false);
         self.find = Some(bar);
         self.refresh_find_history();
+        self.refresh_replace_history();
     }
 
     fn ensure_results_list(&mut self) -> Option<HWND> {
@@ -1151,10 +1186,11 @@ impl App {
         let row_one = body_height + FIND_ROW_GAP;
         let row_two = row_one + FIND_ROW_HEIGHT + FIND_ROW_GAP;
         let available = (width
-            - FIND_BUTTON_WIDTH * 3
+            - FIND_BUTTON_WIDTH * 2
             - FIND_CASE_WIDTH
+            - FIND_WRAP_WIDTH
             - FIND_CLOSE_WIDTH
-            - FIND_ROW_GAP * 5)
+            - FIND_ROW_GAP * 6)
             .max(0);
         let edit_width = available;
         // The combo height covers its closed field plus the drop list; the
@@ -1175,13 +1211,23 @@ impl App {
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.case, x, row_one, FIND_CASE_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_CASE_WIDTH + FIND_ROW_GAP;
+        move_control(bar.wrap, x, row_one, FIND_WRAP_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_WRAP_WIDTH + FIND_ROW_GAP;
         move_control(bar.close, x, row_one, FIND_CLOSE_WIDTH, FIND_ROW_HEIGHT);
         let replace_width = (width
             - FIND_BUTTON_WIDTH * 2
             - FIND_CANCEL_WIDTH
             - FIND_ROW_GAP * 5)
             .max(0);
-        move_control(bar.replace, FIND_ROW_GAP, row_two, replace_width, FIND_ROW_HEIGHT);
+        move_control(bar.replace, FIND_ROW_GAP, row_two, replace_width, FIND_DROPDOWN_HEIGHT);
+        unsafe {
+            let _ = SendMessageW(
+                bar.replace,
+                CB_SETDROPPEDWIDTH,
+                Some(WPARAM(replace_width.max(0) as usize)),
+                None,
+            );
+        }
         let x = FIND_ROW_GAP + replace_width + FIND_ROW_GAP;
         move_control(bar.replace_one, x, row_two, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
@@ -1343,6 +1389,17 @@ impl App {
                     self.editing = true;
                     control.set_read_only(false);
                     control.set_eol(eol);
+                    // Scintilla draws its own context menu, which cannot carry
+                    // application commands; the subclass routes right-clicks
+                    // to the app-owned menu instead.
+                    let _ = unsafe {
+                        SetWindowSubclass(
+                            control.hwnd(),
+                            Some(editor_context_proc),
+                            SUBCLASS_EDITOR,
+                            0,
+                        )
+                    };
                     tracing::info!(
                         text_bytes = document_text.len(),
                         buffer_bytes = control.length(),
@@ -1810,6 +1867,27 @@ impl App {
             && matches!(self.text, Some(TextHandle::Scintilla(_)))
     }
 
+    /// `true` when the buffer should be treated as a JSON document.
+    ///
+    /// Strict validation would hide the JSON entries as soon as an edit breaks
+    /// the syntax, which is exactly when Format and Validate are needed.  The
+    /// leading object or array marker and the file extension are used instead,
+    /// so the entries stay available for malformed documents.
+    fn is_json_document(&self, text: &str) -> bool {
+        if matches!(text.trim_start().chars().next(), Some('{') | Some('[')) {
+            return true;
+        }
+        self.session
+            .read(|doc| {
+                doc.path
+                    .as_ref()
+                    .and_then(|path| path.extension())
+                    .map(|ext| ext.eq_ignore_ascii_case("json"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     fn write_blocked(&mut self, operation: &str) {
         tracing::warn!(operation, "write command rejected: document is read-only or in hex mode");
         self.status_message = format!("{operation}: {MSG_WRITE_BLOCKED}");
@@ -1937,6 +2015,58 @@ impl App {
         chosen.0 as u32
     }
 
+    /// Shows the editor context menu at the cursor.
+    ///
+    /// JSON entries are only added when the buffer parses as JSON, so the menu
+    /// never offers an action that would fail straight away.
+    fn show_editor_context_menu(&mut self) {
+        let writable = self.writable_text();
+        let Some(TextHandle::Scintilla(control)) = &self.text else {
+            return;
+        };
+        let (start, end) = control.selection();
+        let has_selection = start < end;
+        let can_undo = control.can_undo();
+        let can_redo = control.can_redo();
+        let is_json = self.is_json_document(&control.get_text());
+        // Edit commands dispatch by keyboard focus, so the editor must own it
+        // before the menu opens.
+        control.focus();
+        let Some(menu) = create_menu_or_report() else {
+            return;
+        };
+        // SAFETY: the menu is owned locally and destroyed by track_menu.
+        unsafe {
+            append(menu, MF_STRING, ID_EDIT_UNDO, "Undo");
+            append(menu, MF_STRING, ID_EDIT_REDO, "Redo");
+            append(menu, MF_SEPARATOR, 0, "");
+            append(menu, MF_STRING, ID_EDIT_CUT, "Cut");
+            append(menu, MF_STRING, ID_EDIT_COPY, "Copy");
+            append(menu, MF_STRING, ID_EDIT_PASTE, "Paste");
+            append(menu, MF_STRING, ID_EDIT_DELETE, "Delete");
+            append(menu, MF_SEPARATOR, 0, "");
+            append(menu, MF_STRING, ID_EDIT_SELECT_ALL, "Select All");
+            if is_json {
+                append(menu, MF_SEPARATOR, 0, "");
+                append(menu, MF_STRING, ID_FORMAT_JSON, "Format JSON");
+                append(menu, MF_STRING, ID_FORMAT_MINIFY, "Minify JSON");
+                append(menu, MF_STRING, ID_FORMAT_DIAGNOSTIC, "Validate JSON");
+                set_menu_enabled(menu, ID_FORMAT_JSON, writable);
+                set_menu_enabled(menu, ID_FORMAT_MINIFY, writable);
+            }
+        }
+        set_menu_enabled(menu, ID_EDIT_UNDO, can_undo);
+        set_menu_enabled(menu, ID_EDIT_REDO, can_redo);
+        set_menu_enabled(menu, ID_EDIT_CUT, writable && has_selection);
+        set_menu_enabled(menu, ID_EDIT_COPY, has_selection);
+        set_menu_enabled(menu, ID_EDIT_PASTE, writable);
+        set_menu_enabled(menu, ID_EDIT_DELETE, writable && has_selection);
+        let chosen = self.track_menu(menu);
+        if chosen != 0 {
+            self.command(chosen);
+        }
+    }
+
     fn format_json(&mut self, minify: bool) {
         if !self.writable_text() {
             self.write_blocked(if minify { "Minify JSON" } else { "Format JSON" });
@@ -2031,52 +2161,100 @@ impl App {
         self.update_status();
     }
 
-    /// Shows the results context menu for one hit row.
-    fn show_results_context_menu(&mut self, index: usize) {
-        if self.results_mode != ResultsMode::Hits {
-            return;
-        }
-        let Some(hit) = self.session.results.hit(index).copied() else {
-            return;
+    /// Shows the results context menu for one hit row, or for the empty area
+    /// that clears the whole result set.
+    fn show_results_context_menu(&mut self, index: Option<usize>) {
+        let hits_mode = self.results_mode == ResultsMode::Hits;
+        let hit = if hits_mode {
+            index.and_then(|index| self.session.results.hit(index).copied())
+        } else {
+            None
         };
         let Some(menu) = create_menu_or_report() else {
             return;
         };
         // SAFETY: the popup menu is owned locally and destroyed by track_menu.
         unsafe {
-            append(menu, MF_STRING, ID_RESULTS_SHOW_TEXT, "Show in Text");
-            append(menu, MF_STRING, ID_RESULTS_SHOW_HEX, "Show in Hex");
+            if hit.is_some() {
+                append(menu, MF_STRING, ID_RESULTS_SHOW_TEXT, "Show in Text");
+            }
+            if hits_mode {
+                append(menu, MF_STRING, ID_RESULTS_CLEAR, "Clear");
+            }
+            if hit.is_some() || hits_mode {
+                append(menu, MF_SEPARATOR, 0, "");
+            }
+            append(menu, MF_STRING, ID_RESULTS_CLOSE, "Close");
         }
         let command = self.track_menu(menu);
         match command {
             ID_RESULTS_SHOW_TEXT => {
+                let (Some(index), Some(hit)) = (index, hit) else {
+                    return;
+                };
                 if self.session.layout == ViewLayout::Hex {
                     self.set_layout(ViewLayout::Text);
                 }
                 self.hit_cursor = index.saturating_add(1);
                 self.navigate_to(&hit, true);
             }
-            ID_RESULTS_SHOW_HEX => {
-                if self.session.layout != ViewLayout::Hex {
-                    self.set_layout(ViewLayout::Hex);
-                }
-                self.hit_cursor = index.saturating_add(1);
-                self.navigate_to(&hit, true);
+            ID_RESULTS_CLEAR => {
+                self.clear_results();
+                self.status_message = "Search results cleared".to_owned();
+                self.update_status();
             }
+            ID_RESULTS_CLOSE => self.close_results_panel(),
             _ => {}
         }
     }
 
+    /// Closes the results panel and returns to the plain text layout.
+    ///
+    /// Collected hits are kept, so reopening the panel through View > Results
+    /// shows them again; use Clear to drop them.
+    fn close_results_panel(&mut self) {
+        if self.float_frame.is_some() {
+            self.dock_results();
+        }
+        if self.session.layout == ViewLayout::TextAndResults {
+            self.set_layout(ViewLayout::Text);
+        }
+        self.status_message = "Results panel closed".to_owned();
+        self.update_status();
+    }
+
     fn mark_buffer_dirty(&mut self) {
-        self.cancel_search();
-        let revision = self.session.write(|document| {
-            rnotepad_core::document::Document::mark_dirty(document);
-            document.revision
-        });
         // Hits collected before this edit point at offsets that may no longer
-        // exist, so flag the result set as stale until the next search.
-        if let Some(revision) = revision {
-            self.session.results.sync_revision(revision);
+        // exist, and the text they described is gone, so drop them instead of
+        // leaving a stale list the next Find All would appear to confirm.
+        self.clear_results();
+        self.session.write(|document| {
+            rnotepad_core::document::Document::mark_dirty(document);
+        });
+    }
+
+    /// Drops every hit and its highlights, leaving the results panel empty.
+    fn clear_results(&mut self) {
+        self.cancel_search();
+        self.session.results.clear();
+        self.hit_cursor = NO_HIT;
+        self.clear_search_highlights();
+        if self.results_mode == ResultsMode::Hits {
+            self.refresh_results_count();
+        }
+    }
+
+    /// Removes search highlights from every view without touching the hits.
+    fn clear_search_highlights(&mut self) {
+        if let Some(data) = &self.text_data {
+            data.borrow_mut().highlights.clear();
+        }
+        if let Some(view) = &self.hex {
+            view.data().borrow_mut().highlights.clear();
+            view.invalidate();
+        }
+        if let Some(TextHandle::Scintilla(control)) = &self.text {
+            control.clear_highlights();
         }
     }
 
@@ -2143,45 +2321,27 @@ impl App {
         }
     }
 
+    /// Adds a replacement to the persistent recent-replacement list.
+    fn remember_replacement(&mut self, replacement: &str) {
+        if self.replace_history.record(replacement) {
+            self.refresh_replace_history();
+        }
+    }
+
     /// Rebuilds the pattern dropdown from the persisted history.
-    ///
-    /// `CB_RESETCONTENT` also empties the edit field of an editable combo, so
-    /// the pattern currently in the field is saved and restored; a search must
-    /// never lose what the user typed unless the user deletes it.
     fn refresh_find_history(&mut self) {
         let Some(bar) = self.find.as_ref() else {
             return;
         };
-        let current = read_edit(bar.edit).unwrap_or_default();
-        unsafe {
-            let _ = SendMessageW(bar.edit, CB_RESETCONTENT, None, None);
-            for pattern in self.history.patterns().iter().take(SEARCH_HISTORY_LIMIT) {
-                let wide = to_wide(pattern);
-                let _ = SendMessageW(
-                    bar.edit,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide.as_ptr() as isize)),
-                );
-            }
-            if !current.is_empty() {
-                // WM_SETTEXT fills the embedded edit without touching the list.
-                let wide = to_wide(&current);
-                let _ = SendMessageW(
-                    bar.edit,
-                    WM_SETTEXT,
-                    None,
-                    Some(LPARAM(wide.as_ptr() as isize)),
-                );
-                // Leave the caret after the restored pattern, ready for editing.
-                let _ = SendMessageW(
-                    bar.input,
-                    EM_SETSEL,
-                    Some(WPARAM(usize::MAX)),
-                    Some(LPARAM(-1)),
-                );
-            }
-        }
+        fill_history_combo(bar.edit, bar.input, self.history.patterns());
+    }
+
+    /// Rebuilds the replacement dropdown from the persisted history.
+    fn refresh_replace_history(&mut self) {
+        let Some(bar) = self.find.as_ref() else {
+            return;
+        };
+        fill_history_combo(bar.replace, bar.replace_input, self.replace_history.patterns());
     }
 
     fn find_pattern(&self) -> Option<String> {
@@ -2206,6 +2366,15 @@ impl App {
             return false;
         };
         let state = unsafe { SendMessageW(bar.case, BM_GETCHECK, None, None) };
+        state.0 == BST_CHECKED.0 as isize
+    }
+
+    /// `true` when Find Next may continue from the other end of the buffer.
+    fn find_wrap_enabled(&self) -> bool {
+        let Some(bar) = self.find.as_ref() else {
+            return false;
+        };
+        let state = unsafe { SendMessageW(bar.wrap, BM_GETCHECK, None, None) };
         state.0 == BST_CHECKED.0 as isize
     }
 
@@ -2255,11 +2424,12 @@ impl App {
             return;
         };
         let case = self.find_case_sensitive();
+        let wrap = self.find_wrap_enabled();
         self.remember_search(&pattern);
         let found = if let Some(TextHandle::Scintilla(control)) = &self.text {
             let (_, end) = control.selection();
             let from = if end == 0 { 0 } else { end };
-            let hit = control.find(&pattern, case, false, false, from, true);
+            let hit = control.find(&pattern, case, false, false, from, wrap);
             if let Some((start, stop)) = hit {
                 control.set_selection(start, stop);
                 control.focus();
@@ -2290,6 +2460,59 @@ impl App {
         self.update_status();
     }
 
+    /// Rewrites the shared document from the editor buffer.
+    ///
+    /// Search and result previews read the shared document, which otherwise
+    /// only changes when the file is saved.  The editor text excludes the BOM
+    /// and keeps its own EOLs, so the rebuilt byte stream stays aligned with
+    /// the caret offsets the editor reports.  Returns `false` when the buffer
+    /// cannot be encoded, so the caller can stop instead of searching stale
+    /// bytes.
+    fn sync_document_from_editor(&mut self) -> bool {
+        let Some(TextHandle::Scintilla(control)) = &self.text else {
+            return true;
+        };
+        let text = control.get_text();
+        let Some(shared) = self.session.doc.clone() else {
+            return true;
+        };
+        let encoded = {
+            let mut guard = shared
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !guard.kind.is_editable() {
+                return true;
+            }
+            let charset = guard.encoding.charset;
+            let bom = guard.encoding.bom;
+            let encoded = encode(&text, charset);
+            match encoded {
+                Ok(body) => {
+                    let bom_len = bom.len() as usize;
+                    let mut bytes = Vec::with_capacity(bom_len + body.len());
+                    // The document's interpretation layers skip the BOM, so
+                    // the rebuilt stream has to carry the same prefix.
+                    bytes.extend_from_slice(bom.bytes());
+                    bytes.extend_from_slice(&body);
+                    guard.replace_content(bytes, bom_len as u64);
+                    Ok(())
+                }
+                Err(unmappable) => Err((charset, unmappable.len())),
+            }
+        };
+        match encoded {
+            Ok(()) => true,
+            Err((charset, count)) => {
+                self.status_message = format!(
+                    "Search needs an encodable buffer: {count} character(s) cannot be encoded as {}",
+                    charset.display_name()
+                );
+                self.update_status();
+                false
+            }
+        }
+    }
+
     fn start_find_all(&mut self) {
         let Some(pattern) = self.find_pattern() else {
             self.toggle_find_bar(true);
@@ -2297,11 +2520,18 @@ impl App {
             self.update_status();
             return;
         };
+        // Stop any job still holding the document before it is rewritten.
+        self.cancel_search();
+        // The search reads the shared document, which only changes on save;
+        // without this refresh Find All would answer for the bytes that were
+        // loaded rather than the text the user sees.
+        if !self.sync_document_from_editor() {
+            return;
+        }
         let Some(shared) = self.session.doc.clone() else {
             return;
         };
         self.remember_search(&pattern);
-        self.cancel_search();
         let (doc_id, revision) = {
             let guard = shared
                 .read()
@@ -2921,7 +3151,9 @@ impl App {
             return;
         };
         let replacement = self.find_replacement();
+        self.remember_replacement(&replacement);
         let case = self.find_case_sensitive();
+        let wrap = self.find_wrap_enabled();
         let Some(TextHandle::Scintilla(control)) = &self.text else {
             self.status_message = "Replace needs the Scintilla text view".to_owned();
             self.update_status();
@@ -2935,7 +3167,7 @@ impl App {
         {
             Some((start, end))
         } else {
-            control.find(&pattern, case, false, false, end, true)
+            control.find(&pattern, case, false, false, end, wrap)
         };
         let Some((start, end)) = target else {
             self.status_message = format!("No match for \"{pattern}\"");
@@ -2945,8 +3177,23 @@ impl App {
         control.set_selection(start, end);
         control.replace_selection(&replacement);
         control.focus();
+        // Continue after the inserted text so a replacement that contains the
+        // pattern cannot be matched again by the same click.  Selecting the next
+        // hit mirrors Find Next, letting the user repeat Replace to walk through
+        // the document.
+        let resume_at = start.saturating_add(replacement.len());
+        let next = control.find(&pattern, case, false, false, resume_at, wrap);
+        if let Some((next_start, next_end)) = next {
+            control.set_selection(next_start, next_end);
+        }
+        // The editor borrow ends here, so the buffer can be marked dirty.
         self.mark_buffer_dirty();
-        self.status_message = format!("Replaced 1 occurrence at bytes {start}..{end}");
+        self.status_message = match next {
+            Some((next_start, next_end)) => format!(
+                "Replaced 1 occurrence at bytes {start}..{end}; next match at bytes {next_start}..{next_end}"
+            ),
+            None => format!("Replaced 1 occurrence at bytes {start}..{end}; no further match"),
+        };
         self.update_status();
     }
 
@@ -2962,6 +3209,7 @@ impl App {
             return;
         };
         let replacement = self.find_replacement();
+        self.remember_replacement(&replacement);
         let case = self.find_case_sensitive();
         let count = match &self.text {
             Some(TextHandle::Scintilla(control)) => {
@@ -3070,6 +3318,39 @@ impl App {
                 self.status_message = "Reloaded from disk".to_owned();
             }
             Err(err) => self.status_message = format!("Reload failed: {err}"),
+        }
+        self.update_status();
+    }
+
+    /// File > Open Containing Folder.
+    ///
+    /// Explorer is started with `/select` so the folder opens with the
+    /// document highlighted.  A document that has never been saved has no
+    /// folder, so the command reports that instead of silently doing nothing.
+    fn open_containing_folder(&mut self) {
+        let path = self.session.read(|doc| doc.path.clone()).flatten();
+        let Some(path) = path else {
+            self.status_message =
+                "Nothing to reveal: the document has no file on disk".to_owned();
+            self.update_status();
+            return;
+        };
+        // `raw_arg` passes the switch and the path as one literal argument;
+        // the path is quoted for Explorer's own command-line parser because it
+        // may contain spaces.
+        let mut argument = OsString::from("/select,\"");
+        argument.push(path.as_os_str());
+        argument.push("\"");
+        match Command::new("explorer.exe").raw_arg(argument).spawn() {
+            Ok(_) => self.status_message = "Opened containing folder".to_owned(),
+            Err(err) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %err,
+                    "opening the containing folder failed"
+                );
+                self.status_message = format!("Cannot open the containing folder: {err}");
+            }
         }
         self.update_status();
     }
@@ -3401,6 +3682,7 @@ impl App {
         set(ID_FILE_SAVE, editable);
         set(ID_FILE_SAVE_AS, editable);
         set(ID_FILE_RELOAD, has_path);
+        set(ID_FILE_OPEN_FOLDER, has_path);
         set(ID_FILE_CLOSE, has_doc);
         set(ID_EDIT_UNDO, scintilla);
         set(ID_EDIT_REDO, scintilla);
@@ -3590,6 +3872,7 @@ impl App {
             }
             ID_FILE_SAVE_AS => self.save_as(),
             ID_FILE_RELOAD => self.reload_from_disk(),
+            ID_FILE_OPEN_FOLDER => self.open_containing_folder(),
             ID_FILE_CLOSE => self.close_document(),
             ID_FILE_EXIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -3604,6 +3887,9 @@ impl App {
             ID_EDIT_REPLACE => self.open_replace(),
             ID_EDIT_FIND_NEXT => self.find_next(),
             ID_EDIT_FIND_ALL => self.start_find_all(),
+            ID_EDIT_SELECT_ALL => self.edit_command(rnotepad_win::sci_consts::SCI_SELECTALL),
+            ID_EDIT_DELETE => self.edit_command(rnotepad_win::sci_consts::SCI_CLEAR),
+            ID_EDIT_CONTEXT_MENU => self.show_editor_context_menu(),
             ID_VIEW_TEXT => self.set_layout(ViewLayout::Text),
             ID_VIEW_HEX => self.set_layout(ViewLayout::Hex),
             ID_VIEW_SPLIT => self.set_layout(ViewLayout::TextAndHex),
@@ -3769,7 +4055,10 @@ impl App {
                 return;
             }
             if let Ok(index) = usize::try_from(unsafe { (*info).iItem }) {
-                self.show_results_context_menu(index);
+                self.show_results_context_menu(Some(index));
+            } else {
+                // Right-clicking the empty area still offers "Clear".
+                self.show_results_context_menu(None);
             }
         }
     }
@@ -3820,8 +4109,6 @@ impl App {
     }
 }
 
-const EDIT_STYLE: WINDOW_STYLE =
-    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32);
 /// Editable combo box with a drop list and a scrollbar for long histories.
 const FIND_PATTERN_STYLE: WINDOW_STYLE = WINDOW_STYLE(
     WS_CHILD.0
@@ -4061,10 +4348,44 @@ fn show_bar(bar: &FindBar, visible: bool) {
         bar.replace_one,
         bar.replace_all,
         bar.case,
+        bar.wrap,
         bar.close,
         bar.cancel,
     ] {
         show_window(hwnd, visible);
+    }
+}
+
+/// Rebuilds an editable combo box from a history list.
+///
+/// `CB_RESETCONTENT` also empties the edit field of an editable combo, so the
+/// text currently in the field is saved and restored; a search must never lose
+/// what the user typed unless the user deletes it.
+fn fill_history_combo(combo: HWND, input: HWND, patterns: &[String]) {
+    let current = read_edit(combo).unwrap_or_default();
+    unsafe {
+        let _ = SendMessageW(combo, CB_RESETCONTENT, None, None);
+        for pattern in patterns.iter().take(SEARCH_HISTORY_LIMIT) {
+            let wide = to_wide(pattern);
+            let _ = SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(wide.as_ptr() as isize)),
+            );
+        }
+        if !current.is_empty() {
+            // WM_SETTEXT fills the embedded edit without touching the list.
+            let wide = to_wide(&current);
+            let _ = SendMessageW(combo, WM_SETTEXT, None, Some(LPARAM(wide.as_ptr() as isize)));
+            // Leave the caret after the restored text, ready for editing.
+            let _ = SendMessageW(
+                input,
+                EM_SETSEL,
+                Some(WPARAM(usize::MAX)),
+                Some(LPARAM(-1)),
+            );
+        }
     }
 }
 
@@ -4248,6 +4569,7 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         append(file, MF_STRING, ID_FILE_SAVE, "Save\tCtrl+S");
         append(file, MF_STRING, ID_FILE_SAVE_AS, "Save As...");
         append(file, MF_STRING, ID_FILE_RELOAD, "Reload\tCtrl+R");
+        append(file, MF_STRING, ID_FILE_OPEN_FOLDER, "Open Containing Folder");
         append(file, MF_SEPARATOR, 0, "");
         append(file, MF_STRING, ID_FILE_CLOSE, "Close");
         append(file, MF_SEPARATOR, 0, "");
@@ -4326,6 +4648,43 @@ fn create_menu_or_report() -> Option<HMENU> {
 unsafe fn append(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str) {
     let wide = to_wide(text);
     let _ = unsafe { AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr())) };
+}
+
+/// Enables or greys out one menu entry by command id.
+fn set_menu_enabled(menu: HMENU, id: u32, enabled: bool) {
+    let flags = MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED };
+    // SAFETY: the menu handle is alive until track_menu destroys it.
+    let _ = unsafe { EnableMenuItem(menu, id, flags) };
+}
+
+/// Routes editor right-clicks to the app-owned context menu.
+///
+/// Scintilla would otherwise show its built-in popup, which cannot host
+/// application commands such as JSON formatting.
+unsafe extern "system" fn editor_context_proc(
+    hwnd: HWND,
+    message: u32,
+    _wparam: WPARAM,
+    _lparam: LPARAM,
+    _subclass: usize,
+    _refdata: usize,
+) -> LRESULT {
+    if message == WM_CONTEXTMENU {
+        let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+        if !root.is_invalid() {
+            unsafe {
+                let _ = PostMessageW(
+                    Some(root),
+                    WM_COMMAND,
+                    WPARAM(ID_EDIT_CONTEXT_MENU as usize),
+                    LPARAM(0),
+                );
+            }
+            return LRESULT(0);
+        }
+    }
+    // SAFETY: forwarding to the original window procedure.
+    unsafe { DefSubclassProc(hwnd, message, _wparam, _lparam) }
 }
 
 unsafe fn menu_popup(parent: HMENU, popup: HMENU, title: &str) {
@@ -4678,6 +5037,7 @@ pub fn run() -> Result<(), String> {
     app.icons = icons;
     app.recent = recent;
     app.history = SearchHistory::load();
+    app.replace_history = SearchHistory::load_named(REPLACE_STORAGE_FILE);
     let app = Box::into_raw(app);
     // SAFETY: the pointer is handed to the window; WM_NCCREATE stores it and
     // WM_NCDESTROY reclaims it.

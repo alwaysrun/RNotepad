@@ -158,6 +158,9 @@ impl Scintilla {
         self.send(SCI_SETTABWIDTH, 4, 0);
         self.send(SCI_SETCARETLINEVISIBLE, 1, 0);
         self.send(SCI_SETCARETLINEBACK, CARET_LINE_COLOUR, 0);
+        // Alt+drag selects a rectangular block.  Scintilla owns the block
+        // semantics for copy, typing and deletion once the mode is enabled.
+        self.send(SCI_SETMOUSESELECTIONRECTANGULARSWITCH, 1, 0);
         self.send(SCI_SETSELBACK, 1, SELECTION_BACK_COLOUR as isize);
         self.send(SCI_SETSELFORE, 1, SELECTION_TEXT_COLOUR as isize);
         self.send(SCI_SETADDITIONALSELBACK, 1, SELECTION_BACK_COLOUR as isize);
@@ -232,6 +235,18 @@ impl Scintilla {
     #[must_use]
     pub fn is_modified(&self) -> bool {
         self.send(SCI_GETMODIFY, 0, 0) != 0
+    }
+
+    /// `true` when an earlier edit can be undone.
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.send(SCI_CANUNDO, 0, 0) != 0
+    }
+
+    /// `true` when an undone edit can be redone.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.send(SCI_CANREDO, 0, 0) != 0
     }
 
     /// Marks the current buffer as saved.

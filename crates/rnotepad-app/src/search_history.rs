@@ -1,4 +1,4 @@
-//! Persistent list of recent search patterns.
+//! Persistent list of recent search and replacement text.
 //!
 //! Patterns come from a single-line edit control, so storing one per line is
 //! lossless.  Entries are kept newest first next to the executable, so a
@@ -9,33 +9,56 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-/// How many recent patterns the find bar keeps.
+/// How many recent entries each field keeps.
 pub const SEARCH_HISTORY_LIMIT: usize = 20;
 
-const STORAGE_FILE: &str = "search-history.txt";
+const SEARCH_STORAGE_FILE: &str = "search-history.txt";
+/// File holding the replacement field's history next to the executable.
+pub const REPLACE_STORAGE_FILE: &str = "replace-history.txt";
 
 /// Recently used patterns, ordered from newest to oldest.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SearchHistory {
     patterns: Vec<String>,
+    /// File name the list is persisted to, next to the executable.
+    storage_file: &'static str,
+}
+
+impl Default for SearchHistory {
+    fn default() -> Self {
+        Self {
+            patterns: Vec::new(),
+            storage_file: SEARCH_STORAGE_FILE,
+        }
+    }
 }
 
 impl SearchHistory {
-    /// Loads the persisted list, tolerating a missing or unreadable file.
+    /// Loads the find field's persisted list.
     #[must_use]
     pub fn load() -> Self {
-        let Some(path) = storage_path() else {
-            return Self::default();
+        Self::load_named(SEARCH_STORAGE_FILE)
+    }
+
+    /// Loads the list persisted in `storage_file`, tolerating a missing or
+    /// unreadable file.
+    #[must_use]
+    pub fn load_named(storage_file: &'static str) -> Self {
+        let mut history = Self {
+            patterns: Vec::new(),
+            storage_file,
+        };
+        let Some(path) = storage_path(storage_file) else {
+            return history;
         };
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Self::default(),
+            Err(err) if err.kind() == ErrorKind::NotFound => return history,
             Err(err) => {
                 tracing::warn!(path = %path.display(), error = %err, "search history could not be read");
-                return Self::default();
+                return history;
             }
         };
-        let mut history = Self::default();
         for line in text.split('\n') {
             // Strip the CR of CRLF files but keep the pattern byte-for-byte
             // otherwise: leading and trailing spaces are searchable.
@@ -79,7 +102,7 @@ impl SearchHistory {
     }
 
     fn save(&self) {
-        let Some(path) = storage_path() else {
+        let Some(path) = storage_path(self.storage_file) else {
             return;
         };
         if let Some(directory) = path.parent() {
@@ -99,9 +122,9 @@ impl SearchHistory {
     }
 }
 
-/// Per-user storage location; the list is kept next to the executable so a
-/// portable copy carries its history with it.
-fn storage_path() -> Option<PathBuf> {
+/// Location of a history file next to the executable, so a portable copy
+/// carries its history with it.
+fn storage_path(file: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join(STORAGE_FILE))
+    Some(exe.parent()?.join(file))
 }
