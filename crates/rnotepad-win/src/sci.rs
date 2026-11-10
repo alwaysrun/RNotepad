@@ -161,6 +161,12 @@ impl Scintilla {
         // Alt+drag selects a rectangular block.  Scintilla owns the block
         // semantics for copy, typing and deletion once the mode is enabled.
         self.send(SCI_SETMOUSESELECTIONRECTANGULARSWITCH, 1, 0);
+        // Typing must reach every line of the block.  Without this Scintilla
+        // drops the per-line ranges and writes only into the main line.
+        self.send(SCI_SETADDITIONALSELECTIONTYPING, 1, 0);
+        // Paste follows the same rule: one line of text is inserted into every
+        // line of the block instead of only the main line.
+        self.send(SCI_SETMULTIPASTE, SC_MULTIPASTE_EACH as usize, 0);
         self.send(SCI_SETSELBACK, 1, SELECTION_BACK_COLOUR as isize);
         self.send(SCI_SETSELFORE, 1, SELECTION_TEXT_COLOUR as isize);
         self.send(SCI_SETADDITIONALSELBACK, 1, SELECTION_BACK_COLOUR as isize);
@@ -306,6 +312,15 @@ impl Scintilla {
     pub fn set_selection(&self, start: usize, end: usize) {
         self.send(SCI_SETSEL, start, end as isize);
         self.send(SCI_SCROLLCARET, 0, 0);
+    }
+
+    /// Number of selection ranges.
+    ///
+    /// A rectangular selection holds one range per line, so any value above
+    /// one means a block is active.
+    #[must_use]
+    pub fn selection_count(&self) -> usize {
+        self.send(SCI_GETSELECTIONS, 0, 0).max(0) as usize
     }
 
     /// Selection range as `[start, end)`.

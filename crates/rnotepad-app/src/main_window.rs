@@ -105,6 +105,7 @@ use rnotepad_win::view::{
 };
 
 use crate::commands::*;
+use crate::jumplist;
 use crate::recent::{RecentFiles, RECENT_LIMIT};
 use crate::search_history::{SearchHistory, REPLACE_STORAGE_FILE, SEARCH_HISTORY_LIMIT};
 use crate::session::{Session, ViewLayout};
@@ -1570,9 +1571,16 @@ impl App {
     }
 
     /// Opens the recent-file entry selected from the File menu.
+    ///
+    /// Menu rows follow [`RecentFiles::menu_entries`], where pinned files come
+    /// first, so the command id is an index into that order.
     fn open_recent(&mut self, command: u32) {
         let index = (command - ID_FILE_RECENT_FIRST) as usize;
-        let path = self.recent.paths().get(index).cloned();
+        let path = self
+            .recent
+            .menu_entries()
+            .get(index)
+            .map(|entry| entry.path.clone());
         match path {
             Some(path) => self.open_document(path),
             None => {
@@ -1582,10 +1590,49 @@ impl App {
         }
     }
 
+    /// Pins or unpins the current document in the taskbar jump list.
+    fn toggle_pin_current(&mut self) {
+        let Some(path) = self.document_path() else {
+            self.status_message = "Open a file before pinning it".to_owned();
+            self.update_status();
+            return;
+        };
+        let pinned = if self.recent.is_pinned(&path) {
+            self.recent.unpin(&path);
+            false
+        } else {
+            self.recent.pin(&path);
+            true
+        };
+        // The check mark on the recent rows and on the pin command follows the
+        // new state, so both are rebuilt from the model.
+        self.refresh_menu();
+        self.refresh_jump_list();
+        self.status_message = if pinned {
+            format!("Pinned {} to the taskbar list", path.display())
+        } else {
+            format!("Unpinned {} from the taskbar list", path.display())
+        };
+        self.update_status();
+    }
+
+    /// Path of the open document; `None` while the buffer is untitled.
+    fn document_path(&self) -> Option<PathBuf> {
+        self.session.read(|doc| doc.path.clone()).flatten()
+    }
+
+    /// Republishes the taskbar jump list after the recent or pinned lists change.
+    fn refresh_jump_list(&self) {
+        if let Err(err) = jumplist::update(self.recent.pinned_paths(), self.recent.paths()) {
+            tracing::warn!(error = %err, "jump list update failed");
+        }
+    }
+
     /// Records an opened path and refreshes the menu when the list changed.
     fn record_recent(&mut self, path: &Path) {
         if self.recent.record(path) {
             self.refresh_menu();
+            self.refresh_jump_list();
         }
     }
 
@@ -3684,6 +3731,7 @@ impl App {
         set(ID_FILE_RELOAD, has_path);
         set(ID_FILE_OPEN_FOLDER, has_path);
         set(ID_FILE_CLOSE, has_doc);
+        set(ID_FILE_RECENT_PIN, has_path);
         set(ID_EDIT_UNDO, scintilla);
         set(ID_EDIT_REDO, scintilla);
         set(ID_EDIT_CUT, scintilla);
@@ -3737,6 +3785,15 @@ impl App {
             } else {
                 MF_UNCHECKED
             };
+        let pin_flags = MF_BYCOMMAND
+            | if self
+                .document_path()
+                .is_some_and(|path| self.recent.is_pinned(&path))
+            {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
         // Selecting the encoding and EOL menus marks the option in effect,
         // so the user does not have to infer it from the status bar.
         let (current_charset, current_eol) = self
@@ -3749,6 +3806,7 @@ impl App {
             let _ = CheckMenuItem(menu, ID_VIEW_RESULTS_FLOAT, float_flags.0);
             let _ = CheckMenuItem(menu, ID_HELP_ENABLE_LOG, logging_flags.0);
             let _ = CheckMenuItem(menu, ID_EDIT_TOGGLE, editing_flags.0);
+            let _ = CheckMenuItem(menu, ID_FILE_RECENT_PIN, pin_flags.0);
             for (id, _) in CHARSET_MENU_ITEMS {
                 let checked = has_doc && charset_for(id) == Some(current_charset);
                 let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
@@ -3921,6 +3979,7 @@ impl App {
             ID_FIND_REPLACE_BUTTON => self.replace_all(),
             ID_FIND_CLOSE => self.toggle_find_bar(false),
             ID_FIND_CANCEL => self.cancel_search_from_ui(),
+            ID_FILE_RECENT_PIN => self.toggle_pin_current(),
             other => {
                 if (ID_FILE_RECENT_FIRST..=ID_FILE_RECENT_LAST).contains(&other) {
                     self.open_recent(other);
@@ -3970,7 +4029,12 @@ impl App {
                         // presses Enter, matching config-file editing habits.
                         if self.editing && is_newline_char_added(lparam.0) {
                             if let Some(TextHandle::Scintilla(control)) = &self.text {
-                                control.apply_previous_indent();
+                                // A rectangular block holds one range per line;
+                                // indenting only the main line would break the
+                                // column being edited.
+                                if control.selection_count() <= 1 {
+                                    control.apply_previous_indent();
+                                }
                             }
                         }
                         return;
@@ -4555,16 +4619,23 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         append(file, MF_STRING, ID_FILE_OPEN, "Open...\tCtrl+O");
         append(file, MF_SEPARATOR, 0, "");
         let recent_menu = CreatePopupMenu().map_err(|err| err.to_string())?;
-        if recent.paths().is_empty() {
+        let entries = recent.menu_entries();
+        if entries.is_empty() {
             append(recent_menu, MF_STRING | MF_GRAYED, 0, "(no recent files)");
         } else {
-            for (index, path) in recent.paths().iter().take(RECENT_LIMIT).enumerate() {
-                let label = format!("{}. {}", index + 1, path.display());
+            for (index, entry) in entries.iter().take(RECENT_LIMIT).enumerate() {
+                let label = format!("{}. {}", index + 1, entry.path.display());
                 let id = ID_FILE_RECENT_FIRST + index as u32;
-                append(recent_menu, MF_STRING, id, &label);
+                let flags = if entry.pinned {
+                    MF_STRING | MF_CHECKED
+                } else {
+                    MF_STRING
+                };
+                append(recent_menu, flags, id, &label);
             }
         }
         menu_popup(file, recent_menu, "Recent Files");
+        append(file, MF_STRING, ID_FILE_RECENT_PIN, "Pin Current File to Taskbar List");
         append(file, MF_SEPARATOR, 0, "");
         append(file, MF_STRING, ID_FILE_SAVE, "Save\tCtrl+S");
         append(file, MF_STRING, ID_FILE_SAVE_AS, "Save As...");
@@ -5031,7 +5102,15 @@ pub fn run() -> Result<(), String> {
     };
     register_class(HINSTANCE(instance.0), icons.as_ref())?;
     register_float_class(HINSTANCE(instance.0))?;
+    // The taskbar identity must exist before the window is created, and COM
+    // must be initialised before any shell interface is created.
+    if let Err(err) = jumplist::initialise() {
+        tracing::warn!(error = %err, "taskbar jump list unavailable");
+    }
     let recent = RecentFiles::load();
+    if let Err(err) = jumplist::update(recent.pinned_paths(), recent.paths()) {
+        tracing::warn!(error = %err, "jump list update failed");
+    }
     let menu = build_menu(&recent)?;
     let mut app = Box::<App>::default();
     app.icons = icons;

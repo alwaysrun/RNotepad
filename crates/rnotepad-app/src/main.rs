@@ -9,6 +9,7 @@
 //! created.
 
 mod commands;
+mod jumplist;
 mod main_window;
 mod recent;
 mod search_history;

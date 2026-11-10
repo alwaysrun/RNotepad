@@ -130,6 +130,8 @@ pub const ID_HELP_ENABLE_LOG: u32 = 1702;
 pub const ID_FILE_RECENT_FIRST: u32 = 1901;
 /// Last command id reserved for recent-file entries.
 pub const ID_FILE_RECENT_LAST: u32 = 1910;
+/// Pins or unpins the current file in the taskbar jump list.
+pub const ID_FILE_RECENT_PIN: u32 = 1911;
 
 /// Find text editor.
 pub const ID_FIND_EDIT: u32 = 2001;
