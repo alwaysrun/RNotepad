@@ -1,6 +1,6 @@
 [package]
 name = "rnotepad-app"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2021"
 description = "RNotepad Windows shell: main window, commands and session management."
 
