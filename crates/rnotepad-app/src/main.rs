@@ -14,6 +14,7 @@ mod main_window;
 mod recent;
 mod search_history;
 mod session;
+mod settings;
 mod tasks;
 
 use std::io::Write;

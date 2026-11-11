@@ -59,6 +59,14 @@ pub const ID_VIEW_RESULTS: u32 = 1204;
 pub const ID_VIEW_FOLLOW_TAIL: u32 = 1205;
 /// Detach the results panel into a floating frame.
 pub const ID_VIEW_RESULTS_FLOAT: u32 = 1206;
+/// Toggle soft word wrap in the text view.
+pub const ID_VIEW_WORD_WRAP: u32 = 1207;
+/// Increase the editor font size.
+pub const ID_VIEW_FONT_INCREASE: u32 = 1208;
+/// Decrease the editor font size.
+pub const ID_VIEW_FONT_DECREASE: u32 = 1209;
+/// Restore the default editor font size.
+pub const ID_VIEW_FONT_RESET: u32 = 1210;
 
 /// Reinterpret as UTF-8.
 pub const ID_ENC_UTF8: u32 = 1301;

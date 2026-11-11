@@ -1,7 +1,7 @@
 //! Persistent list of recently opened files and files pinned by the user.
 //!
-//! Both lists are stored as plain text so the application needs no
-//! serialisation dependency.  Entries are absolute paths, newest first, and
+//! Both lists share one JSON document beside the executable, so a portable
+//! copy carries them along.  Entries are absolute paths, newest first, and
 //! duplicate paths are collapsed case-insensitively because Windows paths are
 //! not case-sensitive.
 
@@ -9,13 +9,22 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// How many entries the File > Recent Files menu and the taskbar jump list
 /// show per category.
 pub const RECENT_LIMIT: usize = 10;
 
-const STORAGE_DIRECTORY: &str = "RNotepad";
-const STORAGE_FILE: &str = "recent.txt";
-const PINNED_FILE: &str = "pinned.txt";
+const STORAGE_FILE: &str = "recent.json";
+
+/// On-disk shape of `recent.json`; strings keep non-UTF-8 paths lossy instead
+/// of failing the whole document.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct RecentDocument {
+    recent: Vec<String>,
+    pinned: Vec<String>,
+}
 
 /// Recently opened paths, ordered from newest to oldest, plus the paths the
 /// user pinned to the taskbar jump list.
@@ -36,12 +45,29 @@ pub struct MenuEntry {
 }
 
 impl RecentFiles {
-    /// Loads the persisted lists, tolerating missing or unreadable files.
+    /// Loads the persisted lists, tolerating a missing or unreadable file.
     #[must_use]
     pub fn load() -> Self {
-        Self {
-            paths: load_list(STORAGE_FILE),
-            pinned: load_list(PINNED_FILE),
+        let Some(path) = storage_path() else {
+            return Self::default();
+        };
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Self::default(),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "recent files could not be read");
+                return Self::default();
+            }
+        };
+        match serde_json::from_str::<RecentDocument>(&text) {
+            Ok(document) => Self {
+                paths: to_paths(document.recent),
+                pinned: to_paths(document.pinned),
+            },
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "recent files are not valid JSON; starting empty");
+                Self::default()
+            }
         }
     }
 
@@ -101,7 +127,7 @@ impl RecentFiles {
         }
         self.pinned.insert(0, absolute_path(path));
         self.pinned.truncate(RECENT_LIMIT);
-        save_list(PINNED_FILE, &self.pinned);
+        self.save();
         true
     }
 
@@ -114,7 +140,7 @@ impl RecentFiles {
             return false;
         };
         self.pinned.remove(index);
-        save_list(PINNED_FILE, &self.pinned);
+        self.save();
         true
     }
 
@@ -136,75 +162,66 @@ impl RecentFiles {
         }
         self.paths.insert(0, entry);
         self.paths.truncate(RECENT_LIMIT);
-        save_list(STORAGE_FILE, &self.paths);
+        self.save();
         true
+    }
+
+    /// Writes both lists, replacing the previous contents.
+    fn save(&self) {
+        let Some(path) = storage_path() else {
+            return;
+        };
+        let document = RecentDocument {
+            recent: self
+                .paths
+                .iter()
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect(),
+            pinned: self
+                .pinned
+                .iter()
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect(),
+        };
+        let text = match serde_json::to_string_pretty(&document) {
+            Ok(text) => text + "\n",
+            Err(err) => {
+                tracing::warn!(error = %err, "recent files could not be serialised");
+                return;
+            }
+        };
+        if let Err(err) = fs::write(&path, text) {
+            tracing::warn!(path = %path.display(), error = %err, "recent files could not be written");
+        }
     }
 }
 
-/// Reads one persisted list, dropping blanks and case-insensitive duplicates.
-fn load_list(file: &str) -> Vec<PathBuf> {
-    let Some(path) = storage_path(file) else {
-        return Vec::new();
-    };
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Vec::new(),
-        Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "recent files could not be read");
-            return Vec::new();
-        }
-    };
-    let mut entries: Vec<PathBuf> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+/// Converts stored strings back into paths, dropping blanks and
+/// case-insensitive duplicates.
+fn to_paths(entries: Vec<String>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(RECENT_LIMIT);
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
             continue;
         }
-        let candidate = PathBuf::from(line);
-        if entries
-            .iter()
-            .any(|existing| same_file(existing, &candidate))
-        {
+        let candidate = PathBuf::from(entry);
+        if paths.iter().any(|existing| same_file(existing, &candidate)) {
             continue;
         }
-        entries.push(candidate);
-        if entries.len() >= RECENT_LIMIT {
+        paths.push(candidate);
+        if paths.len() >= RECENT_LIMIT {
             break;
         }
     }
-    entries
+    paths
 }
 
-/// Writes one list, replacing the previous contents.
-fn save_list(file: &str, entries: &[PathBuf]) {
-    let Some(path) = storage_path(file) else {
-        return;
-    };
-    if let Some(directory) = path.parent() {
-        if let Err(err) = fs::create_dir_all(directory) {
-            tracing::warn!(path = %directory.display(), error = %err, "recent directory could not be created");
-            return;
-        }
-    }
-    let mut text = String::new();
-    for entry in entries {
-        text.push_str(&entry.to_string_lossy());
-        text.push('\n');
-    }
-    if let Err(err) = fs::write(&path, text) {
-        tracing::warn!(path = %path.display(), error = %err, "recent files could not be written");
-    }
-}
-
-/// Per-user storage location; the lists must not be written next to the
-/// executable because that directory may be read-only.
-fn storage_path(file: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(
-        PathBuf::from(base)
-            .join(STORAGE_DIRECTORY)
-            .join(file),
-    )
+/// Location of `recent.json` next to the executable, so a portable copy
+/// carries its recent files along.
+fn storage_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    Some(executable.parent()?.join(STORAGE_FILE))
 }
 
 /// Makes a relative path absolute so the menu stays stable across launches.

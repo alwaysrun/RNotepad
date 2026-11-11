@@ -1,130 +1,150 @@
-//! Persistent list of recent search and replacement text.
+//! Persistent search and replacement history.
 //!
-//! Patterns come from a single-line edit control, so storing one per line is
-//! lossless.  Entries are kept newest first next to the executable, so a
-//! portable copy carries its history along.  Duplicates are compared exactly
-//! because the find bar can run case-sensitive searches.
+//! Both lists share one JSON document beside the executable so a portable copy
+//! carries its history along.  Duplicates are compared exactly because the
+//! find bar can run case-sensitive searches.
 
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-/// How many recent entries each field keeps.
+use serde::{Deserialize, Serialize};
+
+/// How many recent entries each list keeps.
 pub const SEARCH_HISTORY_LIMIT: usize = 20;
 
-const SEARCH_STORAGE_FILE: &str = "search-history.txt";
-/// File holding the replacement field's history next to the executable.
-pub const REPLACE_STORAGE_FILE: &str = "replace-history.txt";
+const STORAGE_FILE: &str = "history.json";
 
-/// Recently used patterns, ordered from newest to oldest.
-#[derive(Debug)]
-pub struct SearchHistory {
-    patterns: Vec<String>,
-    /// File name the list is persisted to, next to the executable.
-    storage_file: &'static str,
+/// On-disk shape of `history.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct HistoryDocument {
+    search: Vec<String>,
+    replace: Vec<String>,
 }
 
-impl Default for SearchHistory {
-    fn default() -> Self {
-        Self {
-            patterns: Vec::new(),
-            storage_file: SEARCH_STORAGE_FILE,
-        }
-    }
+/// Recently used find and replacement text, newest first.
+#[derive(Debug, Default)]
+pub struct SearchHistory {
+    document: HistoryDocument,
 }
 
 impl SearchHistory {
-    /// Loads the find field's persisted list.
+    /// Loads the persisted lists, tolerating a missing or unreadable file.
     #[must_use]
     pub fn load() -> Self {
-        Self::load_named(SEARCH_STORAGE_FILE)
-    }
-
-    /// Loads the list persisted in `storage_file`, tolerating a missing or
-    /// unreadable file.
-    #[must_use]
-    pub fn load_named(storage_file: &'static str) -> Self {
-        let mut history = Self {
-            patterns: Vec::new(),
-            storage_file,
-        };
-        let Some(path) = storage_path(storage_file) else {
-            return history;
+        let Some(path) = storage_path() else {
+            return Self::default();
         };
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(err) if err.kind() == ErrorKind::NotFound => return history,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Self::default(),
             Err(err) => {
                 tracing::warn!(path = %path.display(), error = %err, "search history could not be read");
-                return history;
+                return Self::default();
             }
         };
-        for line in text.split('\n') {
-            // Strip the CR of CRLF files but keep the pattern byte-for-byte
-            // otherwise: leading and trailing spaces are searchable.
-            let pattern = line.strip_suffix('\r').unwrap_or(line);
-            if pattern.is_empty() || history.patterns.iter().any(|entry| entry == pattern) {
-                continue;
-            }
-            history.patterns.push(pattern.to_owned());
-            if history.patterns.len() >= SEARCH_HISTORY_LIMIT {
-                break;
+        match serde_json::from_str::<HistoryDocument>(&text) {
+            Ok(document) => Self {
+                document: HistoryDocument {
+                    search: sanitise(document.search),
+                    replace: sanitise(document.replace),
+                },
+            },
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "search history is not valid JSON; starting empty");
+                Self::default()
             }
         }
-        history
     }
 
-    /// Patterns in display order, newest first.
+    /// Find patterns in display order, newest first.
     #[must_use]
-    pub fn patterns(&self) -> &[String] {
-        &self.patterns
+    pub fn search_patterns(&self) -> &[String] {
+        &self.document.search
     }
 
-    /// Moves `pattern` to the front of the list and persists the change.
+    /// Replacement texts in display order, newest first.
+    #[must_use]
+    pub fn replace_patterns(&self) -> &[String] {
+        &self.document.replace
+    }
+
+    /// Moves `pattern` to the front of the find list and persists the change.
     ///
     /// Returns `true` when the visible list changed, so callers can skip
     /// redundant work.
-    pub fn record(&mut self, pattern: &str) -> bool {
-        if pattern.is_empty() {
-            return false;
+    pub fn record_search(&mut self, pattern: &str) -> bool {
+        if promote(&mut self.document.search, pattern) {
+            self.save();
+            true
+        } else {
+            false
         }
-        let existing = self.patterns.iter().position(|entry| entry == pattern);
-        if existing == Some(0) {
-            return false;
+    }
+
+    /// Moves `replacement` to the front of the replace list and persists it.
+    ///
+    /// Returns `true` when the visible list changed, so callers can skip
+    /// redundant work.
+    pub fn record_replace(&mut self, replacement: &str) -> bool {
+        if promote(&mut self.document.replace, replacement) {
+            self.save();
+            true
+        } else {
+            false
         }
-        if let Some(index) = existing {
-            self.patterns.remove(index);
-        }
-        self.patterns.insert(0, pattern.to_owned());
-        self.patterns.truncate(SEARCH_HISTORY_LIMIT);
-        self.save();
-        true
     }
 
     fn save(&self) {
-        let Some(path) = storage_path(self.storage_file) else {
+        let Some(path) = storage_path() else {
             return;
         };
-        if let Some(directory) = path.parent() {
-            if let Err(err) = fs::create_dir_all(directory) {
-                tracing::warn!(path = %directory.display(), error = %err, "search history directory could not be created");
+        let text = match serde_json::to_string_pretty(&self.document) {
+            Ok(text) => text + "\n",
+            Err(err) => {
+                tracing::warn!(error = %err, "search history could not be serialised");
                 return;
             }
-        }
-        let mut text = String::new();
-        for pattern in &self.patterns {
-            text.push_str(pattern);
-            text.push('\n');
-        }
+        };
         if let Err(err) = fs::write(&path, text) {
             tracing::warn!(path = %path.display(), error = %err, "search history could not be written");
         }
     }
 }
 
-/// Location of a history file next to the executable, so a portable copy
+/// Promotes `pattern` to the front of one list, keeping it bounded.
+fn promote(patterns: &mut Vec<String>, pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    if patterns.first().is_some_and(|entry| entry == pattern) {
+        return false;
+    }
+    patterns.retain(|entry| entry != pattern);
+    patterns.insert(0, pattern.to_owned());
+    patterns.truncate(SEARCH_HISTORY_LIMIT);
+    true
+}
+
+/// Drops blanks and duplicates from a list read from disk.
+fn sanitise(patterns: Vec<String>) -> Vec<String> {
+    let mut accepted: Vec<String> = Vec::with_capacity(SEARCH_HISTORY_LIMIT);
+    for pattern in patterns {
+        if pattern.is_empty() || accepted.contains(&pattern) {
+            continue;
+        }
+        accepted.push(pattern);
+        if accepted.len() >= SEARCH_HISTORY_LIMIT {
+            break;
+        }
+    }
+    accepted
+}
+
+/// Location of `history.json` next to the executable, so a portable copy
 /// carries its history with it.
-fn storage_path(file: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join(file))
+fn storage_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    Some(executable.parent()?.join(STORAGE_FILE))
 }

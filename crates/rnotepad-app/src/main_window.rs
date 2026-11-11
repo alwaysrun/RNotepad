@@ -21,9 +21,10 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC,
-    GetStockObject, ScreenToClient, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
-    FF_SWISS, FW_NORMAL, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    ReleaseDC, VARIABLE_PITCH, WHITE_BRUSH,
+    GetMonitorInfoW, GetStockObject, MonitorFromPoint, MonitorFromRect, ScreenToClient,
+    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_SWISS, FW_NORMAL, HBRUSH, HFONT,
+    HGDIOBJ, InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, VARIABLE_PITCH, WHITE_BRUSH,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -59,7 +60,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, DrawMenuBar, EnableMenuItem, FCONTROL, FVIRTKEY, GA_ROOT,
     GetAncestor, GetClientRect,
-    GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowRect,
+    GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowPlacement,
+    GetWindowRect,
     GetWindowTextLengthW,
     GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENS,
     IDC_SIZEWE, IDNO,
@@ -68,10 +70,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_YESNOCANCEL, MB_YESNO, MENU_ITEM_FLAGS,
     MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MESSAGEBOX_STYLE, MoveWindow, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SW_HIDE, SW_SHOW,
-    SendMessageW, SetCursor,
+    PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SM_CXSCREEN, SM_CYSCREEN,
+    SW_HIDE, SW_SHOW,
+    SW_SHOWMAXIMIZED, SendMessageW, SetCursor,
     SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
+    WINDOWPLACEMENT,
     WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT, WM_DESTROY,
     WM_DROPFILES, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
@@ -90,7 +94,9 @@ use rnotepad_core::encoding::{decode, encode, precheck_unmappable, BomPolicy, Ch
 use rnotepad_core::format::{Diagnostic, FormatOptions, FormatProvider, JsonFormatProvider};
 use rnotepad_core::search::{MatchHit, SearchMode, SearchQuery};
 
-use rnotepad_win::dw::{MonoFont, DEFAULT_FONT_POINTS, rgb};
+use rnotepad_win::dw::{
+    MonoFont, DEFAULT_FONT_POINTS, MAX_FONT_POINTS, MIN_FONT_POINTS, rgb,
+};
 use rnotepad_win::icon::WindowIcons;
 use rnotepad_win::notify::ChangeWatcher;
 use rnotepad_win::results::ResultsModel;
@@ -107,8 +113,9 @@ use rnotepad_win::view::{
 use crate::commands::*;
 use crate::jumplist;
 use crate::recent::{RecentFiles, RECENT_LIMIT};
-use crate::search_history::{SearchHistory, REPLACE_STORAGE_FILE, SEARCH_HISTORY_LIMIT};
+use crate::search_history::{SearchHistory, SEARCH_HISTORY_LIMIT};
 use crate::session::{Session, ViewLayout};
+use crate::settings::{Settings, WindowPlacement};
 use crate::tasks::SearchJob;
 
 /// Blank lines keep the layout readable and the geometry explicit.
@@ -126,6 +133,11 @@ const SPLITTER_HIT_SLOP: i32 = 3;
 const MARGIN_CELLS: i32 = 5;
 const CHAR_WIDTH_96DPI: i32 = 8;
 const MONO_POINTS: i32 = DEFAULT_FONT_POINTS;
+/// Point size change applied by one Increase/Decrease Font Size command.
+const FONT_STEP_POINTS: i32 = 1;
+/// A restored window must overlap a work area by at least this many pixels
+/// horizontally and vertically before it counts as reachable.
+const MIN_VISIBLE_EDGE: i32 = 96;
 const FONT_FACE: &str = "Consolas";
 const JSON_INDENT: usize = 2;
 const NO_HIT: usize = 0;
@@ -375,10 +387,15 @@ struct App {
     change_state: ChangeState,
     /// Recently opened files shown in the File menu.
     recent: RecentFiles,
-    /// Recently used search patterns shown in the find-bar dropdown.
+    /// Persisted preferences restored at startup and rewritten on change.
+    settings: Settings,
+    /// Effective editor point size shared by the text, hex and large views.
+    font_points: i32,
+    /// `true` while the Scintilla editor soft-wraps long lines.
+    word_wrap: bool,
+    /// Recently used search patterns and replacement text shown in the
+    /// find-bar dropdowns; both live in one persisted document.
     history: SearchHistory,
-    /// Recently used replacement text shown in the replace-field dropdown.
-    replace_history: SearchHistory,
     /// Selection range last copied into the find field.  A repeated Ctrl+F
     /// with the same selection must not overwrite a freshly typed pattern.
     last_find_seed: Option<(usize, usize)>,
@@ -428,8 +445,10 @@ impl Default for App {
             reported_disk_state: None,
             change_state: ChangeState::Clean,
             recent: RecentFiles::default(),
+            settings: Settings::default(),
+            font_points: DEFAULT_FONT_POINTS,
+            word_wrap: false,
             history: SearchHistory::default(),
-            replace_history: SearchHistory::default(),
             last_find_seed: None,
             syncing: false,
             last_text_selection: None,
@@ -482,7 +501,7 @@ fn with_app(hwnd: HWND, visit: impl FnOnce(&mut App)) {
 impl App {
     fn initialise(&mut self) {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
-        match MonoFont::new(dpi, MONO_POINTS) {
+        match MonoFont::new(dpi, self.font_points) {
             Ok(mut font) => {
                 let hdc = unsafe { GetDC(Some(self.hwnd)) };
                 if hdc.is_invalid() {
@@ -1342,21 +1361,100 @@ impl App {
         }
     }
 
-    /// Font size in points the hex view must use so its glyphs match the text
-    /// view, including any zoom the user applied to the Scintilla control.
+    /// Font size in points the hex and large views must use so their glyphs
+    /// match the text view, including any zoom the user applied.
     fn text_font_points(&self) -> i32 {
-        match &self.text {
-            Some(TextHandle::Scintilla(control)) => MONO_POINTS.saturating_add(control.zoom()),
-            _ => MONO_POINTS,
-        }
+        self.font_points
     }
 
-    /// Keeps the hex cell size in step with Scintilla's Ctrl+wheel zoom.
+    /// Keeps the self-drawn views in step with the editor font size.
     fn apply_text_zoom(&mut self) {
-        let points = self.text_font_points();
+        let zoom = match &self.text {
+            Some(TextHandle::Scintilla(control)) => Some(control.zoom()),
+            _ => None,
+        };
+        if let Some(zoom) = zoom {
+            self.font_points = MONO_POINTS
+                .saturating_add(zoom)
+                .clamp(MIN_FONT_POINTS, MAX_FONT_POINTS);
+        }
+        let points = self.font_points;
         if let Some(hex) = &self.hex {
             hex.set_font_points(points);
         }
+        if let Some(TextHandle::Large(view)) = &self.text {
+            view.set_font_points(points);
+        }
+    }
+
+    /// Applies a new point size to every view and persists the preference.
+    fn set_font_points(&mut self, points: i32) {
+        let points = points.clamp(MIN_FONT_POINTS, MAX_FONT_POINTS);
+        self.font_points = points;
+        if let Some(TextHandle::Scintilla(control)) = &self.text {
+            let zoom = points.saturating_sub(MONO_POINTS);
+            control.send(
+                rnotepad_win::sci_consts::SCI_SETZOOM,
+                zoom as isize as usize,
+                0,
+            );
+        }
+        if let Some(hex) = &self.hex {
+            hex.set_font_points(points);
+        }
+        if let Some(TextHandle::Large(view)) = &self.text {
+            view.set_font_points(points);
+        }
+        self.persist_settings();
+        self.status_message = format!("Font size {points} pt");
+        self.update_status();
+    }
+
+    /// Enables or disables soft wrapping in the Scintilla editor.
+    fn toggle_word_wrap(&mut self) {
+        if !matches!(self.text, Some(TextHandle::Scintilla(_))) {
+            self.status_message =
+                "Word wrap needs the editable text view".to_owned();
+            self.update_status();
+            return;
+        }
+        self.word_wrap = !self.word_wrap;
+        if let Some(TextHandle::Scintilla(control)) = &self.text {
+            control.set_word_wrap(self.word_wrap);
+        }
+        self.persist_settings();
+        self.status_message = if self.word_wrap {
+            "Word wrap enabled".to_owned()
+        } else {
+            "Word wrap disabled".to_owned()
+        };
+        self.update_status();
+    }
+
+    /// Writes the current preferences and window placement to disk.
+    fn persist_settings(&self) {
+        let mut placement = self.settings.placement;
+        let mut info = WINDOWPLACEMENT {
+            length: size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a valid out parameter for a live window.
+        if unsafe { GetWindowPlacement(self.hwnd, &mut info) }.is_ok() {
+            let rect = info.rcNormalPosition;
+            placement = Some(WindowPlacement {
+                x: rect.left,
+                y: rect.top,
+                width: rect.right.saturating_sub(rect.left),
+                height: rect.bottom.saturating_sub(rect.top),
+                maximized: info.showCmd == SW_SHOWMAXIMIZED.0 as u32,
+            });
+        }
+        Settings {
+            placement,
+            font_points: self.font_points,
+            word_wrap: self.word_wrap,
+        }
+        .save();
     }
 
     fn rebuild_text_view(&mut self, shared: &SharedDoc) {
@@ -1384,6 +1482,15 @@ impl App {
                 Ok(control) => {
                     let margin = MARGIN_CELLS * CHAR_WIDTH_96DPI;
                     control.apply_style(FONT_FACE, MONO_POINTS, margin);
+                    // Restore the persisted size and wrap state before the
+                    // buffer is shown, so the first paint already uses them.
+                    let zoom = self.font_points.saturating_sub(MONO_POINTS);
+                    control.send(
+                        rnotepad_win::sci_consts::SCI_SETZOOM,
+                        zoom as isize as usize,
+                        0,
+                    );
+                    control.set_word_wrap(self.word_wrap);
                     let document_text = text.unwrap_or_default();
                     control.set_text(&document_text);
                     // Opened files start editable; the toggle can revoke it.
@@ -1419,7 +1526,7 @@ impl App {
             doc: Some(shared.clone()),
             ..Default::default()
         }));
-        match ViewWindow::create(self.hwnd, ViewKind::Text, data.clone(), MONO_POINTS) {
+        match ViewWindow::create(self.hwnd, ViewKind::Text, data.clone(), self.font_points) {
             Ok(view) => {
                 self.text = Some(TextHandle::Large(view));
                 self.text_data = Some(data);
@@ -2363,14 +2470,14 @@ impl App {
 
     /// Adds a pattern to the persistent recent-search list.
     fn remember_search(&mut self, pattern: &str) {
-        if self.history.record(pattern) {
+        if self.history.record_search(pattern) {
             self.refresh_find_history();
         }
     }
 
     /// Adds a replacement to the persistent recent-replacement list.
     fn remember_replacement(&mut self, replacement: &str) {
-        if self.replace_history.record(replacement) {
+        if self.history.record_replace(replacement) {
             self.refresh_replace_history();
         }
     }
@@ -2380,7 +2487,7 @@ impl App {
         let Some(bar) = self.find.as_ref() else {
             return;
         };
-        fill_history_combo(bar.edit, bar.input, self.history.patterns());
+        fill_history_combo(bar.edit, bar.input, self.history.search_patterns());
     }
 
     /// Rebuilds the replacement dropdown from the persisted history.
@@ -2388,7 +2495,7 @@ impl App {
         let Some(bar) = self.find.as_ref() else {
             return;
         };
-        fill_history_combo(bar.replace, bar.replace_input, self.replace_history.patterns());
+        fill_history_combo(bar.replace, bar.replace_input, self.history.replace_patterns());
     }
 
     fn find_pattern(&self) -> Option<String> {
@@ -3744,6 +3851,7 @@ impl App {
         set(ID_VIEW_RESULTS, has_doc);
         set(ID_VIEW_FOLLOW_TAIL, has_doc && matches!(self.text, Some(TextHandle::Large(_))));
         set(ID_VIEW_RESULTS_FLOAT, has_doc);
+        set(ID_VIEW_WORD_WRAP, scintilla);
         set(ID_FIND_CANCEL, self.job.is_some());
         set(ID_EOL_PRESERVE, has_doc);
         set(ID_EOL_CRLF, writable);
@@ -3769,6 +3877,12 @@ impl App {
             };
         let float_flags = MF_BYCOMMAND
             | if self.float_frame.is_some() {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let wrap_flags = MF_BYCOMMAND
+            | if self.word_wrap {
                 MF_CHECKED
             } else {
                 MF_UNCHECKED
@@ -3804,6 +3918,7 @@ impl App {
         unsafe {
             let _ = CheckMenuItem(menu, ID_VIEW_FOLLOW_TAIL, follow_flags.0);
             let _ = CheckMenuItem(menu, ID_VIEW_RESULTS_FLOAT, float_flags.0);
+            let _ = CheckMenuItem(menu, ID_VIEW_WORD_WRAP, wrap_flags.0);
             let _ = CheckMenuItem(menu, ID_HELP_ENABLE_LOG, logging_flags.0);
             let _ = CheckMenuItem(menu, ID_EDIT_TOGGLE, editing_flags.0);
             let _ = CheckMenuItem(menu, ID_FILE_RECENT_PIN, pin_flags.0);
@@ -3954,6 +4069,14 @@ impl App {
             ID_VIEW_RESULTS => self.set_layout(ViewLayout::TextAndResults),
             ID_VIEW_FOLLOW_TAIL => self.toggle_follow_tail(),
             ID_VIEW_RESULTS_FLOAT => self.toggle_results_float(),
+            ID_VIEW_WORD_WRAP => self.toggle_word_wrap(),
+            ID_VIEW_FONT_INCREASE => {
+                self.set_font_points(self.font_points.saturating_add(FONT_STEP_POINTS));
+            }
+            ID_VIEW_FONT_DECREASE => {
+                self.set_font_points(self.font_points.saturating_sub(FONT_STEP_POINTS));
+            }
+            ID_VIEW_FONT_RESET => self.set_font_points(DEFAULT_FONT_POINTS),
             ID_HELP_ENABLE_LOG => self.toggle_logging(),
             ID_EOL_LF => self.set_eol(EolKind::Lf),
             ID_EOL_CRLF => self.set_eol(EolKind::CrLf),
@@ -4139,6 +4262,9 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        // Capture the final window placement and typography before the window
+        // handle becomes invalid.
+        self.persist_settings();
         self.cancel_search();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
@@ -4670,6 +4796,12 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         append(view, MF_STRING, ID_VIEW_SPLIT, "Text + Hex");
         append(view, MF_STRING, ID_VIEW_RESULTS, "Text + Results");
         append(view, MF_SEPARATOR, 0, "");
+        append(view, MF_STRING, ID_VIEW_WORD_WRAP, "Word Wrap");
+        append(view, MF_SEPARATOR, 0, "");
+        append(view, MF_STRING, ID_VIEW_FONT_INCREASE, "Increase Font Size");
+        append(view, MF_STRING, ID_VIEW_FONT_DECREASE, "Decrease Font Size");
+        append(view, MF_STRING, ID_VIEW_FONT_RESET, "Reset Font Size");
+        append(view, MF_SEPARATOR, 0, "");
         append(view, MF_STRING, ID_VIEW_FOLLOW_TAIL, "Follow Tail");
         append(view, MF_STRING, ID_VIEW_RESULTS_FLOAT, "Float Results Panel");
         menu_popup(menu, view, "View");
@@ -5077,7 +5209,85 @@ fn with_app_result<R>(hwnd: HWND, visit: impl FnOnce(&mut App) -> R) -> Option<R
     Some(visit(unsafe { &mut *pointer }))
 }
 
-/// Creates the main window and runs the message loop.
+/// Resolves the window rectangle for startup.
+///
+/// A saved placement is used only while at least [`MIN_VISIBLE_EDGE`] pixels of
+/// it remain inside a monitor's work area; otherwise the window is centred on
+/// the primary monitor so a monitor that was unplugged cannot hide it.
+fn initial_window_rect(settings: &Settings) -> (RECT, bool) {
+    if let Some(placement) = settings.placement {
+        let rect = placement.rect();
+        if window_placement_visible(&rect) {
+            return (rect, placement.maximized);
+        }
+        tracing::info!("saved window placement is off-screen; centring");
+    }
+    (centered_window_rect(), false)
+}
+
+/// Returns `true` when enough of `rect` overlaps a monitor work area to be
+/// reachable with the mouse.
+fn window_placement_visible(rect: &RECT) -> bool {
+    // SAFETY: `rect` is a valid input rectangle.
+    let monitor = unsafe { MonitorFromRect(rect, MONITOR_DEFAULTTONULL) };
+    if monitor.0.is_null() {
+        return false;
+    }
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `monitor` came from MonitorFromRect and `info` is a valid out
+    // parameter with the required `cbSize`.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return false;
+    }
+    let work = info.rcWork;
+    let visible_width = rect.right.min(work.right) - rect.left.max(work.left);
+    let visible_height = rect.bottom.min(work.bottom) - rect.top.max(work.top);
+    visible_width >= MIN_VISIBLE_EDGE && visible_height >= MIN_VISIBLE_EDGE
+}
+
+/// Centres a default-sized window inside the primary monitor work area.
+fn centered_window_rect() -> RECT {
+    // SAFETY: `MonitorFromPoint` and `GetMonitorInfoW` only read system state.
+    let work_area = unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            RECT {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN),
+                bottom: GetSystemMetrics(SM_CYSCREEN),
+            }
+        } else {
+            info.rcWork
+        }
+    };
+    let available_width = (work_area.right - work_area.left).max(1);
+    let available_height = (work_area.bottom - work_area.top).max(1);
+    let width = WINDOW_WIDTH.min(available_width);
+    let height = WINDOW_HEIGHT.min(available_height);
+    let left = work_area.left + (available_width - width) / 2;
+    let top = work_area.top + (available_height - height) / 2;
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// Entry point invoked by the crate's binary target.
+///
+/// # Errors
+///
+/// Returns the first fatal initialisation error, such as a failed window class
+/// registration or window creation.
 pub fn run() -> Result<(), String> {
     // SAFETY: initialising common controls multiple times is allowed.
     unsafe {
@@ -5112,11 +5322,15 @@ pub fn run() -> Result<(), String> {
         tracing::warn!(error = %err, "jump list update failed");
     }
     let menu = build_menu(&recent)?;
+    let settings = Settings::load();
+    let (bounds, restore_maximized) = initial_window_rect(&settings);
     let mut app = Box::<App>::default();
     app.icons = icons;
     app.recent = recent;
     app.history = SearchHistory::load();
-    app.replace_history = SearchHistory::load_named(REPLACE_STORAGE_FILE);
+    app.font_points = settings.font_points;
+    app.word_wrap = settings.word_wrap;
+    app.settings = settings;
     let app = Box::into_raw(app);
     // SAFETY: the pointer is handed to the window; WM_NCCREATE stores it and
     // WM_NCDESTROY reclaims it.
@@ -5126,10 +5340,10 @@ pub fn run() -> Result<(), String> {
             w!("RNotepadMainWindow"),
             w!("RNotepad"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
             None,
             Some(menu),
             Some(HINSTANCE(instance.0)),
@@ -5157,7 +5371,12 @@ pub fn run() -> Result<(), String> {
         }
     });
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        let command = if restore_maximized {
+            SW_SHOWMAXIMIZED
+        } else {
+            SW_SHOW
+        };
+        let _ = ShowWindow(hwnd, command);
         let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
     }
     // The window owns focus right after being shown, so hand it to the editor.

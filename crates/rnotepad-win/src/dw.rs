@@ -23,8 +23,8 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-/// Default point size of the editor font.
-pub const DEFAULT_FONT_POINTS: i32 = 10;
+/// Default point size of the editor font (Chinese size 小四, 12 pt).
+pub const DEFAULT_FONT_POINTS: i32 = 12;
 /// Smallest point size accepted for the self-drawn views.
 pub const MIN_FONT_POINTS: i32 = 6;
 /// Largest point size accepted for the self-drawn views.

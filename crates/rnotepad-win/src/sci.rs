@@ -41,7 +41,7 @@ const SCFIND_REGEXP: usize = 0x0020_0000;
 const SCFIND_NONE: usize = 0x0000_0000;
 const MAX_REPLACEMENTS: usize = 1_000_000;
 const DEFAULT_FONT: &str = "Consolas";
-const DEFAULT_POINTS: i32 = 10;
+const DEFAULT_POINTS: i32 = crate::dw::DEFAULT_FONT_POINTS;
 const NO_MARGIN: i32 = 0;
 const MIN_MARGIN_WIDTH: i32 = 0;
 const INT_MAX_POS: usize = i32::MAX as usize;
@@ -195,6 +195,27 @@ impl Scintilla {
             0,
             margin_width.max(MIN_MARGIN_WIDTH) as isize,
         );
+    }
+
+    /// Enables or disables word wrap.
+    ///
+    /// Wrapped continuation lines are indented like the logical line and the
+    /// end of each wrapped row carries a marker plus a margin rule, so a soft
+    /// break can be told apart from a real newline.
+    pub fn set_word_wrap(&self, enabled: bool) {
+        if enabled {
+            let flags = (SC_WRAPVISUALFLAG_END | SC_WRAPVISUALFLAG_MARGIN) as usize;
+            self.send(SCI_SETWRAPVISUALFLAGS, flags, 0);
+            self.send(
+                SCI_SETWRAPVISUALFLAGSLOCATION,
+                SC_WRAPVISUALFLAGLOC_END_BY_TEXT as usize,
+                0,
+            );
+            self.send(SCI_SETWRAPINDENTMODE, SC_WRAPINDENT_INDENT as usize, 0);
+            self.send(SCI_SETWRAPMODE, SC_WRAP_WORD as usize, 0);
+        } else {
+            self.send(SCI_SETWRAPMODE, SC_WRAP_NONE as usize, 0);
+        }
     }
 
     /// Replaces the whole buffer, even while the control is read-only.
