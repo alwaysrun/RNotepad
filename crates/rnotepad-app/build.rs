@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Icon asset next to the SVG sources.
+/// Bundle icon name written next to the generated resources.
 const ICON_FILE: &str = "RNotepad.ico";
 /// Relative path from this crate to the shared assets directory.
 const ICON_PATH: &str = "../assets/icons/RNotepad.ico";

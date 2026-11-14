@@ -1,72 +1,46 @@
-//! Application icon loaded from the bundled SVG assets.
+//! Application icon loaded from the bundled `.ico` asset.
 //!
-//! Windows has no GDI entry point for SVG, but Direct2D exposes an SVG
-//! document renderer (`ID2D1DeviceContext5::CreateSvgDocument`).  The icons
-//! are rasterised once at startup into a 32-bit DIB and wrapped in `HICON`
-//! handles, so the title bar and taskbar show the same artwork that ships in
-//! `crates/assets/icons`.
+//! `build.rs` embeds the same file into the executable resources, and this
+//! module turns it into live `HICON` handles for the window class, title bar,
+//! taskbar and Alt+Tab list.  Only the `.ico` asset is used so every surface
+//! shows exactly the artwork that ships with the executable.
 
-use std::ffi::c_void;
-use std::mem::ManuallyDrop;
-use std::ptr;
+use std::mem::size_of;
 
-use windows::core::{BOOL, Interface};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_F, D2D_SIZE_U,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Device, ID2D1DeviceContext5, ID2D1Factory1, ID2D1Image,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_MAP_OPTIONS_READ,
-};
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
-    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_9_2,
-    D3D_FEATURE_LEVEL_9_3,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
-};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HGDIOBJ,
-};
-use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, ICON_BIG, ICON_SMALL,
-    SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW, WM_SETICON,
+    CreateIconFromResourceEx, DestroyIcon, GetSystemMetrics, SendMessageW, HICON, ICON_BIG,
+    ICON_SMALL, LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
 };
 
 use crate::error::{WinError, WinResult};
 
-/// Large application icon rendered at the system icon size.
-const LARGE_ICON_SVG: &str = include_str!("../../assets/icons/RNotepad.svg");
-/// Small application icon artwork, simplified for 16 px displays.
-const SMALL_ICON_SVG: &str = include_str!("../../assets/icons/RNotepad-16.svg");
-/// The SVG viewport declared by both assets; used only to strip the fixed
-/// `width`/`height` attributes so the artwork scales to the target size.
-const SVG_DECLARED_SIZE: &str = "256";
+/// The single application icon shared by the executable and the window.
+const ICON_FILE: &[u8] = include_bytes!("../../assets/icons/RNotepad.ico");
+/// `ICONDIR` header: reserved, type and image count, all 16-bit.
+const ICONDIR_BYTES: usize = 6;
+/// `ICONDIRENTRY` record describing one stored image.
+const ICONDIRENTRY_BYTES: usize = 16;
+/// `ICONDIR.idType` value for icon files; `2` denotes a cursor.
+const ICONDIR_TYPE_ICON: u16 = 1;
+/// Byte offset of `ICONDIRENTRY.dwBytesInRes`.
+const ENTRY_LENGTH_OFFSET: usize = 8;
+/// Byte offset of `ICONDIRENTRY.dwImageOffset`.
+const ENTRY_OFFSET_OFFSET: usize = 12;
+/// A zero width or height encodes 256 pixels in an `ICONDIRENTRY`.
+const ENTRY_EDGE_256: u32 = 256;
+/// `dwVer` for version 3.00 icons, the format shipped since Windows 95.
+const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
 /// Fallback icon edge in pixels when the system metric is unavailable.
 const FALLBACK_LARGE_ICON: i32 = 32;
 /// Fallback small icon edge in pixels when the system metric is unavailable.
 const FALLBACK_SMALL_ICON: i32 = 16;
-/// Direct2D renders at screen resolution; icons are pixel-sized.
-const ICON_DPI: f32 = 96.0;
-/// Bytes per BGRA pixel.
-const BYTES_PER_PIXEL: usize = 4;
-/// Feature levels accepted by the D3D device, newest first.
-const FEATURE_LEVELS: [D3D_FEATURE_LEVEL; 6] = [
-    D3D_FEATURE_LEVEL_11_0,
-    D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_10_0,
-    D3D_FEATURE_LEVEL_9_3,
-    D3D_FEATURE_LEVEL_9_2,
-    D3D_FEATURE_LEVEL_9_1,
-];
+
+/// One image stored inside the icon file.
+struct IconImage<'a> {
+    bytes: &'a [u8],
+    edge: u32,
+}
 
 /// Owned large and small window icons.
 pub struct WindowIcons {
@@ -75,8 +49,9 @@ pub struct WindowIcons {
 }
 
 impl WindowIcons {
-    /// Rasterises both bundled SVGs; the caller keeps the result for the life
-    /// of the window because `HICON` handles must stay valid while in use.
+    /// Creates both icon sizes from the bundled `.ico`; the caller keeps the
+    /// result for the life of the window because `HICON` handles must stay
+    /// valid while in use.
     pub fn load() -> WinResult<Self> {
         let large_edge = icon_edge(
             unsafe { GetSystemMetrics(SM_CXICON) },
@@ -88,10 +63,17 @@ impl WindowIcons {
             unsafe { GetSystemMetrics(SM_CYSMICON) },
             FALLBACK_SMALL_ICON,
         );
-        let large_pixels = rasterise(LARGE_ICON_SVG, large_edge)?;
-        let small_pixels = rasterise(SMALL_ICON_SVG, small_edge)?;
-        let large = create_icon(&large_pixels, large_edge)?;
-        let small = create_icon(&small_pixels, small_edge)?;
+        let large = create_icon(large_edge)?;
+        let small = match create_icon(small_edge) {
+            Ok(small) => small,
+            Err(err) => {
+                // SAFETY: the large handle was created above and is not shared.
+                unsafe {
+                    let _ = DestroyIcon(large);
+                }
+                return Err(err);
+            }
+        };
         Ok(Self { large, small })
     }
 
@@ -141,267 +123,125 @@ fn icon_edge(primary: i32, secondary: i32, fallback: i32) -> u32 {
     u32::try_from(if edge > 0 { edge } else { fallback }).unwrap_or(fallback as u32)
 }
 
-/// Renders an SVG document into straight-alpha BGRA pixels.
-fn rasterise(svg: &str, edge: u32) -> WinResult<Vec<u8>> {
-    // The root `width`/`height` attributes pin the artwork to 256 DIPs; the
-    // viewport size passed to Direct2D must win so the icon scales down.
-    let scalable = svg
-        .replace(&format!(" width=\"{SVG_DECLARED_SIZE}\""), "")
-        .replace(&format!(" height=\"{SVG_DECLARED_SIZE}\""), "");
-    let stream = unsafe { SHCreateMemStream(Some(scalable.as_bytes())) }
-        .ok_or_else(|| WinError::new("SHCreateMemStream returned a null stream"))?;
-
-    let dxgi = create_dxgi_device()?;
-    let factory: ID2D1Factory1 = unsafe {
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-    }
-    .map_err(|err| WinError::from_windows("D2D1CreateFactory", err))?;
-    let device: ID2D1Device =
-        unsafe { factory.CreateDevice(&dxgi) }.map_err(|err| WinError::from_windows("CreateDevice", err))?;
-    let context: ID2D1DeviceContext5 = unsafe {
-        device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-    }
-    .map_err(|err| WinError::from_windows("CreateDeviceContext", err))?
-    .cast()
-    .map_err(|err| WinError::from_windows("ID2D1DeviceContext5", err))?;
-
-    let properties = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: ICON_DPI,
-        dpiY: ICON_DPI,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-        colorContext: ManuallyDrop::new(None),
-    };
-    let target = unsafe {
-        context.CreateBitmap(
-            D2D_SIZE_U {
-                width: edge,
-                height: edge,
-            },
-            None,
-            0,
-            &properties,
-        )
-    }
-    .map_err(|err| WinError::from_windows("CreateBitmap", err))?;
-    let image: ID2D1Image = target
-        .cast()
-        .map_err(|err| WinError::from_windows("ID2D1Bitmap1 -> ID2D1Image", err))?;
-    // SAFETY: `image` is the bitmap created above and lives until the context
-    // is dropped; SetTarget has no failure mode.
-    unsafe { context.SetTarget(&image) };
-
-    let document = unsafe {
-        context.CreateSvgDocument(
-            &stream,
-            D2D_SIZE_F {
-                width: edge as f32,
-                height: edge as f32,
-            },
-        )
-    }
-    .map_err(|err| WinError::from_windows("CreateSvgDocument", err))?;
-    // SAFETY: the target is set and every drawing call below is paired with
-    // EndDraw; BeginDraw returns `()` on the render-target interface.
-    unsafe {
-        context.BeginDraw();
-        context.DrawSvgDocument(&document);
-        context.EndDraw(None, None)
-    }
-    .map_err(|err| WinError::from_windows("EndDraw", err))?;
-
-    // Render-target bitmaps are not CPU readable; copy into a staging bitmap
-    // created with CANNOT_DRAW | CPU_READ, which `Map` accepts.
-    let staging_properties = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: ICON_DPI,
-        dpiY: ICON_DPI,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_CANNOT_DRAW | D2D1_BITMAP_OPTIONS_CPU_READ,
-        colorContext: ManuallyDrop::new(None),
-    };
-    let staging = unsafe {
-        context.CreateBitmap(
-            D2D_SIZE_U {
-                width: edge,
-                height: edge,
-            },
-            None,
-            0,
-            &staging_properties,
-        )
-    }
-    .map_err(|err| WinError::from_windows("CreateBitmap (staging)", err))?;
-    let source: ID2D1Bitmap = target
-        .cast()
-        .map_err(|err| WinError::from_windows("ID2D1Bitmap1 -> ID2D1Bitmap", err))?;
-    unsafe { staging.CopyFromBitmap(None, &source, None) }
-        .map_err(|err| WinError::from_windows("CopyFromBitmap", err))?;
-    let mapped = unsafe { staging.Map(D2D1_MAP_OPTIONS_READ) }
-        .map_err(|err| WinError::from_windows("ID2D1Bitmap1::Map", err))?;
-    let pixels = copy_straight_alpha(&mapped, edge);
-    // SAFETY: the mapping was created above and is released exactly once.
-    let _ = unsafe { staging.Unmap() };
-    Ok(pixels)
-}
-
-/// Copies premultiplied Direct2D pixels into straight-alpha BGRA for `HICON`,
-/// which interprets the alpha channel without premultiplication.
-fn copy_straight_alpha(mapped: &windows::Win32::Graphics::Direct2D::D2D1_MAPPED_RECT, edge: u32) -> Vec<u8> {
-    let row_bytes = edge as usize * BYTES_PER_PIXEL;
-    let mut pixels = vec![0u8; row_bytes * edge as usize];
-    for y in 0..edge as usize {
-        // SAFETY: the mapping covers `edge` rows of at least `pitch` bytes.
-        let source_row = unsafe { mapped.bits.add(y * mapped.pitch as usize) };
-        let destination_row = y * row_bytes;
-        for x in 0..edge as usize {
-            // SAFETY: `x` stays inside the mapped row.
-            let source = unsafe { source_row.add(x * BYTES_PER_PIXEL) };
-            let alpha = unsafe { *source.add(3) };
-            if alpha == 0 {
-                continue;
-            }
-            for channel in 0..3 {
-                // SAFETY: BGRA channels live at offsets 0..=2.
-                let value = unsafe { *source.add(channel) };
-                let straight = (value as u32 * 255 / alpha as u32).min(255) as u8;
-                pixels[destination_row + x * BYTES_PER_PIXEL + channel] = straight;
-            }
-            pixels[destination_row + x * BYTES_PER_PIXEL + 3] = alpha;
-        }
-    }
-    pixels
-}
-
-fn create_dxgi_device() -> WinResult<IDXGIDevice> {
-    match create_d3d_device(D3D_DRIVER_TYPE_HARDWARE) {
-        Ok(dxgi) => Ok(dxgi),
-        Err(hardware_error) => {
-            tracing::warn!(error = %hardware_error, "hardware device unavailable, trying WARP");
-            create_d3d_device(D3D_DRIVER_TYPE_WARP)
-        }
-    }
-}
-
-fn create_d3d_device(driver: windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE) -> WinResult<IDXGIDevice> {
-    let mut device: Option<ID3D11Device> = None;
-    // SAFETY: all out parameters are valid for the duration of the call.
-    unsafe {
-        D3D11CreateDevice(
-            None,
-            driver,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&FEATURE_LEVELS),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            None,
-        )
-    }
-    .map_err(|err| WinError::from_windows("D3D11CreateDevice", err))?;
-    let device = device.ok_or_else(|| WinError::new("D3D11CreateDevice returned no device"))?;
-    device
-        .cast()
-        .map_err(|err| WinError::from_windows("ID3D11Device -> IDXGIDevice", err))
-}
-
-fn create_icon(pixels: &[u8], edge: u32) -> WinResult<HICON> {
+/// Creates a system-sized `HICON` from the image closest to `edge`.
+fn create_icon(edge: u32) -> WinResult<HICON> {
+    let image = select_image(ICON_FILE, edge)?;
     let size = i32::try_from(edge).map_err(|_| WinError::new("icon size out of range"))?;
-    let header = BITMAPINFOHEADER {
-        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: size,
-        biHeight: -size,
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
-        biSizeImage: edge * edge * BYTES_PER_PIXEL as u32,
-        ..Default::default()
-    };
-    let info = BITMAPINFO {
-        bmiHeader: header,
-        ..Default::default()
-    };
-    let mut bits: *mut c_void = ptr::null_mut();
-    // SAFETY: `info` is a valid bitmap description; `bits` receives the buffer.
-    let color = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
-        .map_err(|err| WinError::from_windows("CreateDIBSection", err))?;
-    if bits.is_null() {
-        // SAFETY: the bitmap was created above and is not used further.
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(color.0));
-        }
-        return Err(WinError::new("CreateDIBSection returned a null pixel buffer"));
-    }
-    // SAFETY: the DIB is top-down and tightly packed, matching `pixels`.
+    // SAFETY: `image.bytes` is a validated, self-contained icon image; the
+    // returned handle is owned by the caller.
     unsafe {
-        ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
-    }
-
-    let mask_stride = (edge as usize).div_ceil(32) * (std::mem::size_of::<u32>());
-    let mask_bits = vec![0u8; mask_stride * edge as usize];
-    // SAFETY: `mask_bits` outlives the call; all-zero means "use the alpha channel".
-    let mask = unsafe {
-        CreateBitmap(
+        CreateIconFromResourceEx(
+            image.bytes,
+            true,
+            ICON_RESOURCE_VERSION,
             size,
             size,
-            1,
-            1,
-            Some(mask_bits.as_ptr() as *const c_void),
+            LR_DEFAULTCOLOR,
         )
-    };
-    if mask.is_invalid() {
-        // SAFETY: the colour bitmap was created above.
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(color.0));
-        }
-        return Err(WinError::new("CreateBitmap returned an invalid mask bitmap"));
+    }
+    .map_err(|err| WinError::from_windows("CreateIconFromResourceEx", err))
+}
+
+/// Picks the smallest stored image that still covers `desired`; when every
+/// image is smaller, the largest one is used so scaling never invents detail.
+fn select_image(data: &[u8], desired: u32) -> WinResult<IconImage<'_>> {
+    if data.len() < ICONDIR_BYTES {
+        return Err(WinError::new("icon file is shorter than the ICONDIR header"));
+    }
+    let reserved = read_u16(data, 0)?;
+    let kind = read_u16(data, 2)?;
+    let count = read_u16(data, 4)?;
+    if reserved != 0 || kind != ICONDIR_TYPE_ICON || count == 0 {
+        return Err(WinError::new(format!(
+            "not an icon file: reserved={reserved}, type={kind}, images={count}"
+        )));
     }
 
-    let icon_info = ICONINFO {
-        fIcon: BOOL(1),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: color,
-    };
-    // SAFETY: both bitmaps are valid and `CreateIconIndirect` copies them.
-    let icon = unsafe { CreateIconIndirect(&icon_info) }
-        .map_err(|err| WinError::from_windows("CreateIconIndirect", err));
-    // SAFETY: the system copied the bitmaps; the originals are deleted once.
-    unsafe {
-        let _ = DeleteObject(HGDIOBJ(mask.0));
-        let _ = DeleteObject(HGDIOBJ(color.0));
+    let mut smallest_fit: Option<IconImage<'_>> = None;
+    let mut largest: Option<IconImage<'_>> = None;
+    for index in 0..count as usize {
+        let entry = ICONDIR_BYTES + index * ICONDIRENTRY_BYTES;
+        if entry + ICONDIRENTRY_BYTES > data.len() {
+            return Err(WinError::new(format!(
+                "icon directory entry {index} lies outside the file"
+            )));
+        }
+        let width = entry_edge(data[entry]);
+        let height = entry_edge(data[entry + 1]);
+        let length = read_u32(data, entry + ENTRY_LENGTH_OFFSET)? as usize;
+        let offset = read_u32(data, entry + ENTRY_OFFSET_OFFSET)? as usize;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| WinError::new(format!("icon image {index} overflows the file")))?;
+        if length == 0 || end > data.len() {
+            return Err(WinError::new(format!(
+                "icon image {index} lies outside the file"
+            )));
+        }
+        let image = IconImage {
+            bytes: &data[offset..end],
+            edge: width.max(height),
+        };
+        if image.edge >= desired {
+            if smallest_fit
+                .as_ref()
+                .is_none_or(|best| image.edge < best.edge)
+            {
+                smallest_fit = Some(image);
+            }
+        } else if largest.as_ref().is_none_or(|best| image.edge > best.edge) {
+            largest = Some(image);
+        }
     }
-    icon
+
+    smallest_fit
+        .or(largest)
+        .ok_or_else(|| WinError::new("icon file contains no usable image"))
+}
+
+/// Converts an `ICONDIRENTRY` dimension byte into pixels.
+fn entry_edge(value: u8) -> u32 {
+    if value == 0 {
+        ENTRY_EDGE_256
+    } else {
+        u32::from(value)
+    }
+}
+
+/// Reads a little-endian `u16` at `offset`.
+fn read_u16(data: &[u8], offset: usize) -> WinResult<u16> {
+    let bytes = data
+        .get(offset..offset + size_of::<u16>())
+        .ok_or_else(|| WinError::new(format!("icon field at {offset} lies outside the file")))?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+/// Reads a little-endian `u32` at `offset`.
+fn read_u32(data: &[u8], offset: usize) -> WinResult<u32> {
+    let bytes = data
+        .get(offset..offset + size_of::<u32>())
+        .ok_or_else(|| WinError::new(format!("icon field at {offset} lies outside the file")))?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Verifies the Direct2D SVG pipeline produces a visible icon, which also
-    /// catches a mis-sized viewport (fully clipped artwork is transparent).
+    /// Verifies the bundled icon can serve both system metric sizes.
     #[test]
-    fn bundled_svg_renders_opaque_pixels() {
-        let edge = FALLBACK_LARGE_ICON as u32;
-        let pixels = rasterise(LARGE_ICON_SVG, edge).expect("SVG rasterisation");
-        assert_eq!(pixels.len(), (edge * edge) as usize * BYTES_PER_PIXEL);
-        let centre = ((edge / 2) * edge + edge / 2) as usize * BYTES_PER_PIXEL;
-        assert!(pixels[centre + 3] > 0, "centre pixel is transparent");
-        // The artwork has rounded corners, so the last pixel must fall outside
-        // the plate. A non-transparent corner means the SVG was clipped instead
-        // of scaled into the requested viewport.
-        let corner = ((edge - 1) * edge + edge - 1) as usize * BYTES_PER_PIXEL;
-        assert!(
-            pixels[corner + 3] < 32,
-            "corner pixel is opaque: SVG was clipped rather than scaled"
-        );
-        assert!(pixels.iter().any(|channel| *channel > 0), "icon is blank");
+    fn bundled_ico_contains_images_for_both_metrics() {
+        for edge in [FALLBACK_SMALL_ICON as u32, FALLBACK_LARGE_ICON as u32] {
+            let image = select_image(ICON_FILE, edge).expect("icon directory");
+            assert!(!image.bytes.is_empty(), "missing image for {edge}px");
+        }
+    }
+
+    /// The selection must prefer an image that covers the requested size.
+    #[test]
+    fn selection_prefers_the_smallest_covering_image() {
+        let image = select_image(ICON_FILE, 64).expect("icon directory");
+        let largest = select_image(ICON_FILE, ENTRY_EDGE_256).expect("icon directory");
+        assert!(image.edge <= largest.edge);
     }
 }
