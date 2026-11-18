@@ -23,7 +23,7 @@ const RESOURCE_SCRIPT: &str = "rnotepad-resources.rc";
 const RESOURCE_OBJECT: &str = "rnotepad-resources.res";
 
 /// File description shown on the *Details* tab.
-const FILE_DESCRIPTION: &str = "RNotepad - text, log and configuration workbench";
+const FILE_DESCRIPTION: &str = "RNotepad - text, log viewer and configure format";
 /// Product name shown on the *Details* tab.
 const PRODUCT_NAME: &str = "RNotepad";
 /// Vendor shown on the *Details* tab.
