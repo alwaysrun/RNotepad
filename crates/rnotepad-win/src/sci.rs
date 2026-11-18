@@ -237,6 +237,26 @@ impl Scintilla {
         }
     }
 
+    /// Replaces the whole buffer in a single undoable step.
+    ///
+    /// `SCI_SETTEXT` clears the undo history, so formatting would otherwise be
+    /// irreversible.  Selecting the whole buffer and replacing it inside one
+    /// undo group keeps Ctrl+Z working; the save point and the undo buffer are
+    /// deliberately left untouched so the document stays dirty.
+    pub fn replace_all_with_undo(&self, text: &str) {
+        let read_only = self.send(SCI_GETREADONLY, 0, 0) != 0;
+        if read_only {
+            self.set_read_only(false);
+        }
+        self.send(SCI_BEGINUNDOACTION, 0, 0);
+        self.set_selection(0, self.length());
+        self.replace_selection(text);
+        self.send(SCI_ENDUNDOACTION, 0, 0);
+        if read_only {
+            self.set_read_only(true);
+        }
+    }
+
     /// Returns the whole buffer as UTF-8.
     #[must_use]
     pub fn get_text(&self) -> String {

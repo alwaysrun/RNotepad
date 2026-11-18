@@ -91,7 +91,9 @@ use rnotepad_core::coord::{CoordMap, RawByteOffset, Utf8Pos};
 use rnotepad_core::document::{Document, DocumentKind, ViewMode};
 use rnotepad_core::eol::{EolKind, EolWritePolicy};
 use rnotepad_core::encoding::{decode, encode, precheck_unmappable, BomPolicy, Charset};
-use rnotepad_core::format::{Diagnostic, FormatOptions, FormatProvider, JsonFormatProvider};
+use rnotepad_core::format::{
+    Diagnostic, FormatKind, FormatOptions, FormatProvider, JsonFormatProvider, XmlConfigProvider,
+};
 use rnotepad_core::search::{MatchHit, SearchMode, SearchQuery};
 
 use rnotepad_win::dw::{
@@ -139,7 +141,7 @@ const FONT_STEP_POINTS: i32 = 1;
 /// horizontally and vertically before it counts as reachable.
 const MIN_VISIBLE_EDGE: i32 = 96;
 const FONT_FACE: &str = "Consolas";
-const JSON_INDENT: usize = 2;
+const CONFIG_INDENT: usize = 2;
 const NO_HIT: usize = 0;
 const MAX_SCI_HIGHLIGHTS: usize = 2000;
 const MAX_REPLACEMENTS: usize = 1_000_000;
@@ -2021,25 +2023,24 @@ impl App {
             && matches!(self.text, Some(TextHandle::Scintilla(_)))
     }
 
-    /// `true` when the buffer should be treated as a JSON document.
+    /// Detected configuration format of the current buffer.
     ///
-    /// Strict validation would hide the JSON entries as soon as an edit breaks
-    /// the syntax, which is exactly when Format and Validate are needed.  The
-    /// leading object or array marker and the file extension are used instead,
-    /// so the entries stay available for malformed documents.
-    fn is_json_document(&self, text: &str) -> bool {
-        if matches!(text.trim_start().chars().next(), Some('{') | Some('[')) {
-            return true;
+    /// Detection uses the leading marker and the file extension, so malformed
+    /// documents keep their menu entries instead of losing them to validation.
+    fn detected_format(&self, text: &str) -> Option<FormatKind> {
+        FormatKind::detect(self.document_path().as_deref(), text)
+    }
+
+    /// Command ids of format, minify and validate for one format.
+    fn format_command_ids(kind: FormatKind) -> (u32, u32, u32) {
+        match kind {
+            FormatKind::Json => (ID_FORMAT_JSON, ID_FORMAT_MINIFY, ID_FORMAT_DIAGNOSTIC),
+            FormatKind::Xml => (
+                ID_FORMAT_XML,
+                ID_FORMAT_XML_MINIFY,
+                ID_FORMAT_XML_DIAGNOSTIC,
+            ),
         }
-        self.session
-            .read(|doc| {
-                doc.path
-                    .as_ref()
-                    .and_then(|path| path.extension())
-                    .map(|ext| ext.eq_ignore_ascii_case("json"))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
     }
 
     fn write_blocked(&mut self, operation: &str) {
@@ -2171,8 +2172,9 @@ impl App {
 
     /// Shows the editor context menu at the cursor.
     ///
-    /// JSON entries are only added when the buffer parses as JSON, so the menu
-    /// never offers an action that would fail straight away.
+    /// Configuration entries are only added for a detected JSON or XML buffer,
+    /// so the menu never offers a format-specific action that would fail
+    /// straight away.
     fn show_editor_context_menu(&mut self) {
         let writable = self.writable_text();
         let Some(TextHandle::Scintilla(control)) = &self.text else {
@@ -2182,7 +2184,7 @@ impl App {
         let has_selection = start < end;
         let can_undo = control.can_undo();
         let can_redo = control.can_redo();
-        let is_json = self.is_json_document(&control.get_text());
+        let detected = self.detected_format(&control.get_text());
         // Edit commands dispatch by keyboard focus, so the editor must own it
         // before the menu opens.
         control.focus();
@@ -2200,13 +2202,15 @@ impl App {
             append(menu, MF_STRING, ID_EDIT_DELETE, "Delete");
             append(menu, MF_SEPARATOR, 0, "");
             append(menu, MF_STRING, ID_EDIT_SELECT_ALL, "Select All");
-            if is_json {
+            if let Some(kind) = detected {
+                let (format, minify, validate) = Self::format_command_ids(kind);
+                let name = kind.display_name();
                 append(menu, MF_SEPARATOR, 0, "");
-                append(menu, MF_STRING, ID_FORMAT_JSON, "Format JSON");
-                append(menu, MF_STRING, ID_FORMAT_MINIFY, "Minify JSON");
-                append(menu, MF_STRING, ID_FORMAT_DIAGNOSTIC, "Validate JSON");
-                set_menu_enabled(menu, ID_FORMAT_JSON, writable);
-                set_menu_enabled(menu, ID_FORMAT_MINIFY, writable);
+                append(menu, MF_STRING, format, &format!("Format {name} Config"));
+                append(menu, MF_STRING, minify, &format!("Minify {name} Config"));
+                append(menu, MF_STRING, validate, &format!("Validate {name} Config"));
+                set_menu_enabled(menu, format, writable);
+                set_menu_enabled(menu, minify, writable);
             }
         }
         set_menu_enabled(menu, ID_EDIT_UNDO, can_undo);
@@ -2221,37 +2225,48 @@ impl App {
         }
     }
 
-    fn format_json(&mut self, minify: bool) {
+    /// Formats or minifies the buffer with `provider`.
+    ///
+    /// The document is only replaced when the provider succeeds; failures are
+    /// reported in the problems panel and leave the buffer untouched.  The
+    /// replacement is one undoable edit, so Ctrl+Z restores the original text.
+    fn apply_format(&mut self, provider: &dyn FormatProvider, minify: bool) {
+        let label = provider.kind().display_name();
         if !self.writable_text() {
-            self.write_blocked(if minify { "Minify JSON" } else { "Format JSON" });
+            let operation = if minify { "Minify" } else { "Format" };
+            self.write_blocked(&format!("{operation} {label}"));
             return;
         }
-        let text = match &self.text {
-            Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
-            _ => None,
-        };
-        let Some(text) = text else {
+        let Some(text) = self.scintilla_text() else {
             self.status_message = "Formatting requires the Scintilla text view".to_owned();
             self.update_status();
             return;
         };
-        let provider = JsonFormatProvider;
+        if !self.format_type_matches(provider.kind(), &text) {
+            return;
+        }
         let result = if minify {
             provider.minify(&text)
         } else {
-            provider.format(&text, &FormatOptions { indent: JSON_INDENT, lenient: false })
+            provider.format(
+                &text,
+                &FormatOptions {
+                    indent: CONFIG_INDENT,
+                    lenient: false,
+                },
+            )
         };
         match result {
             Ok(output) => {
                 if let Some(TextHandle::Scintilla(control)) = &self.text {
-                    control.set_text(&output.text);
+                    control.replace_all_with_undo(&output.text);
                 }
                 self.mark_buffer_dirty();
                 self.clear_problems();
                 self.status_message = if minify {
-                    "JSON minified".to_owned()
+                    format!("{label} config minified")
                 } else {
-                    "JSON formatted".to_owned()
+                    format!("{label} config formatted")
                 };
             }
             Err(diagnostics) => self.show_diagnostics(&diagnostics),
@@ -2259,28 +2274,61 @@ impl App {
         self.update_status();
     }
 
-    fn validate_json(&mut self) {
-        let text = match &self.text {
-            Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
-            _ => None,
-        };
-        let Some(text) = text else {
+    /// Validates the buffer with `provider` and reports the first problem.
+    fn validate_with(&mut self, provider: &dyn FormatProvider) {
+        let label = provider.kind().display_name();
+        let Some(text) = self.scintilla_text() else {
             self.status_message = "Validation requires the Scintilla text view".to_owned();
             self.update_status();
             return;
         };
-        let provider = JsonFormatProvider;
+        if !self.format_type_matches(provider.kind(), &text) {
+            return;
+        }
         match provider.validate(&text) {
             Ok(()) => {
                 self.clear_problems();
-                self.status_message = "JSON is valid".to_owned();
+                self.status_message = format!("{label} config is valid");
             }
             Err(diagnostics) => self.show_diagnostics(&diagnostics),
         }
         self.update_status();
     }
 
-    /// Shows JSON diagnostics in the shared panel and jumps to the first one.
+    /// Copy of the Scintilla buffer, or `None` for the other text views.
+    fn scintilla_text(&self) -> Option<String> {
+        match &self.text {
+            Some(TextHandle::Scintilla(control)) => Some(control.get_text()),
+            Some(TextHandle::Large(_)) | None => None,
+        }
+    }
+
+    /// Rejects a command when the buffer is recognisably another format.
+    ///
+    /// An unrecognised buffer is allowed through so validation can report the
+    /// actual syntax problem instead of a generic type mismatch.
+    fn format_type_matches(&mut self, expected: FormatKind, text: &str) -> bool {
+        let Some(detected) = self.detected_format(text) else {
+            return true;
+        };
+        if detected == expected {
+            return true;
+        }
+        tracing::warn!(
+            expected = expected.display_name(),
+            detected = detected.display_name(),
+            "format command rejected: document type mismatch"
+        );
+        self.status_message = format!(
+            "Not a {} document (detected {})",
+            expected.display_name(),
+            detected.display_name()
+        );
+        self.update_status();
+        false
+    }
+
+    /// Shows format diagnostics in the shared panel and jumps to the first one.
     ///
     /// The original buffer is never modified here; the panel only reports the
     /// problems found before formatting is applied.
@@ -3862,6 +3910,8 @@ impl App {
         set(ID_BOM_STRIP, writable);
         set(ID_FORMAT_JSON, writable);
         set(ID_FORMAT_MINIFY, writable);
+        set(ID_FORMAT_XML, writable);
+        set(ID_FORMAT_XML_MINIFY, writable);
         for (id, _) in CHARSET_MENU_ITEMS {
             set(id, has_doc);
         }
@@ -4085,9 +4135,12 @@ impl App {
             ID_BOM_KEEP => self.set_bom(BomPolicy::Keep),
             ID_BOM_ADD => self.set_bom(BomPolicy::Add),
             ID_BOM_STRIP => self.set_bom(BomPolicy::Strip),
-            ID_FORMAT_JSON => self.format_json(false),
-            ID_FORMAT_MINIFY => self.format_json(true),
-            ID_FORMAT_DIAGNOSTIC => self.validate_json(),
+            ID_FORMAT_JSON => self.apply_format(&JsonFormatProvider, false),
+            ID_FORMAT_MINIFY => self.apply_format(&JsonFormatProvider, true),
+            ID_FORMAT_DIAGNOSTIC => self.validate_with(&JsonFormatProvider),
+            ID_FORMAT_XML => self.apply_format(&XmlConfigProvider, false),
+            ID_FORMAT_XML_MINIFY => self.apply_format(&XmlConfigProvider, true),
+            ID_FORMAT_XML_DIAGNOSTIC => self.validate_with(&XmlConfigProvider),
             ID_HELP_ABOUT => {
                 self.show_message(
                     MB_ICONINFORMATION,
@@ -4822,11 +4875,20 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         }
         menu_popup(menu, eol, "EOL");
 
-        let format = CreatePopupMenu().map_err(|err| err.to_string())?;
-        append(format, MF_STRING, ID_FORMAT_JSON, "Format JSON");
-        append(format, MF_STRING, ID_FORMAT_MINIFY, "Minify JSON");
-        append(format, MF_STRING, ID_FORMAT_DIAGNOSTIC, "Validate JSON");
-        menu_popup(menu, format, "Format");
+        let config = CreatePopupMenu().map_err(|err| err.to_string())?;
+        append(config, MF_STRING, ID_FORMAT_JSON, "Format JSON Config");
+        append(config, MF_STRING, ID_FORMAT_MINIFY, "Minify JSON Config");
+        append(config, MF_STRING, ID_FORMAT_DIAGNOSTIC, "Validate JSON Config");
+        append(config, MF_SEPARATOR, 0, "");
+        append(config, MF_STRING, ID_FORMAT_XML, "Format XML Config");
+        append(config, MF_STRING, ID_FORMAT_XML_MINIFY, "Minify XML Config");
+        append(
+            config,
+            MF_STRING,
+            ID_FORMAT_XML_DIAGNOSTIC,
+            "Validate XML Config",
+        );
+        menu_popup(menu, config, "Config");
 
         let help = CreatePopupMenu().map_err(|err| err.to_string())?;
         append(help, MF_STRING, ID_HELP_ENABLE_LOG, "Enable Logging");

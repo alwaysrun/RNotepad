@@ -12,6 +12,7 @@ encoding_rs.workspace = true
 memchr.workspace = true
 regex.workspace = true
 serde_json.workspace = true
+quick-xml.workspace = true
 serde.workspace = true
 unicode-width.workspace = true
 crossbeam-channel.workspace = true

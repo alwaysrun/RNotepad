@@ -128,6 +128,12 @@ pub const ID_FORMAT_JSON: u32 = 1601;
 pub const ID_FORMAT_MINIFY: u32 = 1602;
 /// Validate JSON and jump to the first problem.
 pub const ID_FORMAT_DIAGNOSTIC: u32 = 1603;
+/// Format an XML configuration file.
+pub const ID_FORMAT_XML: u32 = 1604;
+/// Minify an XML configuration file.
+pub const ID_FORMAT_XML_MINIFY: u32 = 1605;
+/// Validate an XML configuration file.
+pub const ID_FORMAT_XML_DIAGNOSTIC: u32 = 1606;
 
 /// Show the about box.
 pub const ID_HELP_ABOUT: u32 = 1701;

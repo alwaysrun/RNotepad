@@ -1,9 +1,11 @@
 //! Format providers: validation, pretty-printing and minification.
 //!
-//! P0 ships the JSON provider.  Diagnostics carry the UTF-8 span, the display
-//! line/column and, when available, a hint that explains how to fix the
-//! problem.  Formatting never writes to the document; the caller previews
-//! [`FormatOutput`] and applies it as a single edit.
+//! Diagnostics carry the UTF-8 span, the display line/column and, when
+//! available, a hint that explains how to fix the problem.  Formatting never
+//! writes to the document; the caller previews [`FormatOutput`] and applies it
+//! as a single edit.
+
+use std::path::Path;
 
 use serde::Serialize;
 use serde_json::ser::{PrettyFormatter, Serializer};
@@ -12,10 +14,76 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::coord::{Span, Utf8Pos};
 
+pub mod xml;
+
+pub use xml::XmlConfigProvider;
+
 /// Supported formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatKind {
     Json,
+    Xml,
+}
+
+/// File extensions that only ever appear on JSON documents.
+const JSON_EXTENSIONS: &[&str] = &["json"];
+/// File extensions that identify XML-based configuration documents.
+const XML_EXTENSIONS: &[&str] = &[
+    "xml", "config", "csproj", "props", "targets", "nuspec", "plist", "resx", "xaml",
+];
+/// Extensions that are XML-like but should not be reformatted as configuration.
+const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
+/// Leading byte-order mark tolerated before the first significant character.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+/// Number of characters inspected when rejecting an HTML doctype.
+const DOCTYPE_PROBE_LEN: usize = 14;
+
+impl FormatKind {
+    /// Name shown in menu labels and status messages.
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Json => "JSON",
+            Self::Xml => "XML",
+        }
+    }
+
+    /// Detects the format from the path extension, falling back to the first
+    /// significant character of the buffer.
+    ///
+    /// Detection is advisory: it drives the editor context menu and the type
+    /// check inside format commands, never the state of the top-level menu.
+    #[must_use]
+    pub fn detect(path: Option<&Path>, text: &str) -> Option<Self> {
+        if let Some(extension) = path
+            .and_then(Path::extension)
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+        {
+            if HTML_EXTENSIONS.contains(&extension.as_str()) {
+                return None;
+            }
+            if JSON_EXTENSIONS.contains(&extension.as_str()) {
+                return Some(Self::Json);
+            }
+            if XML_EXTENSIONS.contains(&extension.as_str()) {
+                return Some(Self::Xml);
+            }
+        }
+        let body = text.trim_start_matches(|ch: char| ch.is_whitespace() || ch == BYTE_ORDER_MARK);
+        match body.chars().next()? {
+            '{' | '[' => Some(Self::Json),
+            '<' => {
+                let probe: String = body.chars().take(DOCTYPE_PROBE_LEN).collect();
+                if probe.to_ascii_lowercase().starts_with("<!doctype html") {
+                    None
+                } else {
+                    Some(Self::Xml)
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Formatting options.
@@ -148,7 +216,8 @@ impl FormatProvider for JsonFormatProvider {
     }
 }
 
-const MAX_INDENT: usize = 8;
+/// Upper bound for the indent width accepted from callers.
+pub(crate) const MAX_INDENT: usize = 8;
 
 fn parse_for_output(
     text: &str,
@@ -194,7 +263,8 @@ fn internal_diagnostic(text: &str, message: &str) -> Diagnostic {
     }
 }
 
-fn position_to_offset(text: &str, line: u32, column: u32) -> usize {
+/// Byte offset of a one-based line and column.
+pub(crate) fn position_to_offset(text: &str, line: u32, column: u32) -> usize {
     if line <= 1 {
         return (column.saturating_sub(1) as usize).min(text.len());
     }
@@ -211,7 +281,8 @@ fn position_to_offset(text: &str, line: u32, column: u32) -> usize {
     text.len()
 }
 
-fn display_column(text: &str, offset: usize) -> u32 {
+/// One-based display column of a byte offset, honouring wide characters.
+pub(crate) fn display_column(text: &str, offset: usize) -> u32 {
     let line_start = text[..offset.min(text.len())]
         .rfind('\n')
         .map_or(0, |idx| idx + 1);
@@ -438,5 +509,38 @@ mod tests {
     fn invalid_json_never_returns_output() {
         let provider = JsonFormatProvider;
         assert!(provider.format("{", &FormatOptions::default()).is_err());
+    }
+
+    #[test]
+    fn detects_json_from_extension_and_prefix() {
+        assert_eq!(
+            FormatKind::detect(Some(Path::new("pom.json")), "not json"),
+            Some(FormatKind::Json)
+        );
+        assert_eq!(FormatKind::detect(None, "\n\t[1]"), Some(FormatKind::Json));
+    }
+
+    #[test]
+    fn detects_xml_from_extension_and_prefix() {
+        for name in ["pom.xml", "web.config", "app.csproj", "Info.plist"] {
+            assert_eq!(
+                FormatKind::detect(Some(Path::new(name)), "text"),
+                Some(FormatKind::Xml),
+                "{name}"
+            );
+        }
+        assert_eq!(FormatKind::detect(None, "\u{feff}<?xml?>"), Some(FormatKind::Xml));
+        assert_eq!(
+            FormatKind::detect(None, "<root><a/></root>"),
+            Some(FormatKind::Xml)
+        );
+    }
+
+    #[test]
+    fn leaves_html_and_plain_text_undetected() {
+        assert_eq!(FormatKind::detect(Some(Path::new("index.html")), "<html/>"), None);
+        assert_eq!(FormatKind::detect(None, "<!DOCTYPE html><html/>"), None);
+        assert_eq!(FormatKind::detect(None, "plain text"), None);
+        assert_eq!(FormatKind::detect(None, ""), None);
     }
 }

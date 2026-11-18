@@ -49,6 +49,7 @@ encoding_rs = "0.8.44"
 memchr = "2.8.3"
 regex = "1.13.1"
 serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_precision"] }
+quick-xml = { version = "0.41.0", default-features = false }
 serde = "1.0.228"
 unicode-width = "0.2.3"
 crossbeam-channel = "0.5.17"
