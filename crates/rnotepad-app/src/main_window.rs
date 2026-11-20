@@ -17,14 +17,18 @@ use std::time::SystemTime;
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, GlobalFree,
+    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM, GlobalFree,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC,
-    GetMonitorInfoW, GetStockObject, MonitorFromPoint, MonitorFromRect, ScreenToClient,
-    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_SWISS, FW_NORMAL, HBRUSH, HFONT,
-    HGDIOBJ, InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, VARIABLE_PITCH, WHITE_BRUSH,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
+    GetMonitorInfoW, GetStockObject, GetSysColor, GetTextExtentPoint32W, IntersectClipRect,
+    MonitorFromPoint, MonitorFromRect, RestoreDC, SaveDC, ScreenToClient, SelectClipRgn,
+    SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, COLOR_BTNFACE,
+    COLOR_BTNTEXT, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HFONT,
+    HGDIOBJ,
+    InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT, VARIABLE_PITCH, WHITE_BRUSH,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -40,10 +44,13 @@ use windows::Win32::UI::Controls::{
     GetComboBoxInfo, InitCommonControlsEx, BST_CHECKED, COMBOBOXINFO, EM_SETSEL, ICC_BAR_CLASSES,
     ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES,
     INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
-    LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT,
+    LVM_ENSUREVISIBLE, LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETITEMCOUNT, LVSICF_NOSCROLL,
+    LVM_GETITEMRECT,
     LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SINGLESEL, NMLISTVIEW, NMLVDISPINFOW, NM_RCLICK, NMHDR, SB_SETPARTS,
-    SB_SETTEXTW, STATUSCLASSNAMEW, WC_LISTVIEWW,
+    LVS_REPORT, LVS_SINGLESEL, NMLISTVIEW, NMLVDISPINFOW, NMLVCUSTOMDRAW, NM_CLICK, NM_CUSTOMDRAW,
+    NM_RCLICK, NMHDR, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, WC_LISTVIEWW, CDDS_ITEMPREPAINT,
+    CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -77,7 +84,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
     WINDOWPLACEMENT,
     WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT, WM_DESTROY,
-    WM_DROPFILES, WM_KEYDOWN,
+    WM_DROPFILES, WM_GETFONT, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
     WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETTEXT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
@@ -101,7 +108,7 @@ use rnotepad_win::dw::{
 };
 use rnotepad_win::icon::WindowIcons;
 use rnotepad_win::notify::ChangeWatcher;
-use rnotepad_win::results::ResultsModel;
+use rnotepad_win::results::{ResultGroup, ResultRow};
 use rnotepad_win::save::{save_document, SaveRequest, SaveError};
 use rnotepad_win::sci::{
     is_newline_char_added, Scintilla, SCN_CHARADDED_CODE, SCN_UPDATEUI_CODE, SCN_ZOOM_CODE,
@@ -185,16 +192,39 @@ const SUBCLASS_EDITOR: usize = 3;
 
 /// Column headers and widths of the search-hit table.
 const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Text", 400)];
-/// Characters shown in the hit preview before ellipses are added.
-const RESULT_PREVIEW_CHARS: usize = 100;
-/// Characters of context kept before the match inside a hit preview.
-const RESULT_PREVIEW_LEAD_CHARS: usize = 20;
+/// Character budget assumed until the list-view font has been measured.
+const RESULT_PREVIEW_FALLBACK_CHARS: usize = 100;
+/// Narrowest preview budget, used when the panel is barely wide enough.
+const RESULT_PREVIEW_MIN_CHARS: usize = 16;
+/// Widest preview budget, so a very wide panel does not build huge strings.
+const RESULT_PREVIEW_MAX_CHARS: usize = 512;
+/// Preview build-and-measure passes used to fit a cell exactly.
+///
+/// The first pass uses the average glyph width; the second rescales by the
+/// measured width so wide scripts such as CJK still fit without clipping.
+const RESULT_PREVIEW_FIT_PASSES: usize = 3;
+/// Share of the preview budget kept before the match.
+const RESULT_PREVIEW_LEAD_DIVISOR: usize = 3;
+const RESULT_PREVIEW_LEAD_MIN_CHARS: usize = 20;
+const RESULT_PREVIEW_LEAD_MAX_CHARS: usize = 120;
+/// Characters kept after the leading context so the match stays visible.
+const RESULT_PREVIEW_MATCH_RESERVE_CHARS: usize = 8;
+/// Horizontal padding of one list-view cell, in physical pixels.
+const RESULT_CELL_PADDING: i32 = 8;
 /// Raw bytes read before a match when the line is longer than the preview.
-const RESULT_PREVIEW_PREFIX_BYTES: u64 = 512;
+const RESULT_PREVIEW_PREFIX_BYTES: u64 = 1024;
 /// Raw bytes read from a match onwards when the line is longer than the preview.
-const RESULT_PREVIEW_SUFFIX_BYTES: u64 = 1024;
+const RESULT_PREVIEW_SUFFIX_BYTES: u64 = 2048;
 /// Marker placed where a hit preview omits text.
 const RESULT_PREVIEW_ELLIPSIS: char = '…';
+/// Sample text averaged to estimate the advance width of the list-view font.
+const RESULT_MEASURE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+/// Group header typography and layout.
+const RESULT_HEADER_FONT_FACE: &str = "Segoe UI";
+const RESULT_HEADER_FONT_POINTS: i32 = 9;
+const RESULT_HEADER_INDENT: i32 = 8;
+const RESULT_HEADER_EXPANDED_GLYPH: char = '\u{25BC}';
+const RESULT_HEADER_COLLAPSED_GLYPH: char = '\u{25B6}';
 /// Column headers and widths of the JSON problem table.
 const PROBLEM_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Message", 300)];
 /// Extended styles of the results list.
@@ -211,12 +241,19 @@ const RESULTS_PREVIEW_GUTTER: i32 = 4;
 const FLOAT_CLASS_NAME: &str = "RNotepadFloatFrame";
 /// Caption of the floating results frame.
 const FLOAT_TITLE: &str = "Results";
-/// Menu items of the results context menu, kept above zero as Win32 requires.
+// Menu items of the results context menu, kept above zero as Win32 requires.
+/// Jumps back to the match behind a hit row.
 const ID_RESULTS_SHOW_TEXT: u32 = 3001;
-/// Removes every hit from the results panel.
-const ID_RESULTS_CLEAR: u32 = 3002;
-/// Closes the results panel.
-const ID_RESULTS_CLOSE: u32 = 3003;
+/// Expands or collapses the group behind a header row.
+const ID_RESULTS_TOGGLE_GROUP: u32 = 3002;
+const ID_RESULTS_EXPAND_ALL: u32 = 3003;
+const ID_RESULTS_COLLAPSE_ALL: u32 = 3004;
+/// Drops the group behind a header row.
+const ID_RESULTS_REMOVE_GROUP: u32 = 3005;
+/// Drops every group.
+const ID_RESULTS_REMOVE_ALL: u32 = 3006;
+/// Closes the results panel while keeping the collected groups.
+const ID_RESULTS_CLOSE: u32 = 3007;
 /// Charset commands and their menu labels, shared by both menus.
 const CHARSET_MENU_ITEMS: [(u32, &str); 9] = [
     (ID_ENC_UTF8, "UTF-8"),
@@ -415,6 +452,10 @@ struct App {
     /// Width last applied to the preview column, so layout passes triggered by
     /// unrelated geometry do not rewrite it and repaint the header.
     results_preview_width: i32,
+    /// Average advance width of the list-view font, measured once and cached.
+    preview_char_width: i32,
+    /// Bold font used to draw collapsible group headers.
+    results_header_font: Option<HFONT>,
     /// Axis of the divider being dragged, if any.
     split_axis: Option<SplitAxis>,
     status_message: String,
@@ -458,6 +499,8 @@ impl Default for App {
             split_ratio: TEXT_SPLIT_RATIO,
             results_split_ratio: TEXT_SPLIT_RATIO,
             results_preview_width: 0,
+            preview_char_width: 0,
+            results_header_font: None,
             split_axis: None,
             status_message: String::new(),
             editing: false,
@@ -832,14 +875,151 @@ impl App {
         self.refresh_results_count();
     }
 
-    /// Line preview shown in the Text column for one hit.
-    fn hit_preview_text(&self, index: usize) -> String {
-        let Some(hit) = self.session.results.hit(index) else {
+    /// Line preview shown in the Text column for one hit row.
+    ///
+    /// The preview is measured against the column width and rebuilt narrower
+    /// until it fits, because the list view clips an overlong cell instead of
+    /// shortening it.  Keeping the whole preview visible also keeps the match
+    /// and the context before it readable without horizontal scrolling.
+    fn hit_preview_text(&mut self, index: usize) -> String {
+        let Some(ResultRow::Hit { group, hit }) = self.session.results.row(index) else {
             return String::new();
         };
-        self.session
-            .read(|document| line_preview(document, hit))
-            .unwrap_or_default()
+        let Some(hit) = self.session.results.hit(group, hit).copied() else {
+            return String::new();
+        };
+        let available = (self.results_preview_width - RESULT_CELL_PADDING).max(0);
+        let mut budget = self.preview_char_budget();
+        let mut preview = String::new();
+        for _ in 0..RESULT_PREVIEW_FIT_PASSES {
+            preview = self
+                .session
+                .read(|document| line_preview(document, &hit, budget))
+                .unwrap_or_default();
+            if available <= 0 {
+                break;
+            }
+            let width = self.measure_text_width(&preview);
+            if width <= available || budget <= RESULT_PREVIEW_MIN_CHARS {
+                break;
+            }
+            let scaled = (budget as f64 * available as f64 / width as f64) as usize;
+            let next = scaled.clamp(RESULT_PREVIEW_MIN_CHARS, budget.saturating_sub(1));
+            if next >= budget {
+                break;
+            }
+            budget = next;
+        }
+        preview
+    }
+
+    /// Number of characters whose glyphs fit in the preview column.
+    ///
+    /// The list view clips a cell without an ellipsis, so the budget has to be
+    /// derived from the measured column width to keep the whole preview visible
+    /// without a horizontal scrollbar.
+    fn preview_char_budget(&mut self) -> usize {
+        let char_width = self.average_char_width();
+        let usable = self
+            .results_preview_width
+            .saturating_sub(RESULT_CELL_PADDING)
+            .max(0);
+        if char_width <= 0 {
+            return RESULT_PREVIEW_FALLBACK_CHARS;
+        }
+        (usable as usize / char_width as usize)
+            .clamp(RESULT_PREVIEW_MIN_CHARS, RESULT_PREVIEW_MAX_CHARS)
+    }
+
+    /// Average advance width of the list-view font, measured on first use.
+    fn average_char_width(&mut self) -> i32 {
+        if self.preview_char_width > 0 {
+            return self.preview_char_width;
+        }
+        let Some(list) = self.results_list else {
+            return 0;
+        };
+        let measured = measure_list_char_width(list);
+        if measured > 0 {
+            self.preview_char_width = measured;
+        }
+        measured
+    }
+
+    /// Client rectangle of the results list, or an empty rectangle when the
+    /// list has not been created yet.
+    fn results_client_rect(&self) -> RECT {
+        let mut rect = RECT::default();
+        if let Some(list) = self.results_list {
+            // SAFETY: the handle comes from this app's own child window.
+            unsafe {
+                let _ = GetClientRect(list, &mut rect);
+            }
+        }
+        rect
+    }
+
+    /// Full bounds of one results row, in list client coordinates.
+    fn results_row_rect(&self, row: usize) -> Option<RECT> {
+        let list = self.results_list?;
+        // `left` carries the LVIR_BOUNDS selector, whose value is zero.
+        let mut rect = RECT::default();
+        // SAFETY: LVM_GETITEMRECT only reads geometry and never re-enters paint.
+        let handled = unsafe {
+            SendMessageW(
+                list,
+                LVM_GETITEMRECT,
+                Some(WPARAM(row)),
+                Some(LPARAM(&mut rect as *mut RECT as isize)),
+            )
+        };
+        (handled.0 != 0).then_some(rect)
+    }
+
+    /// Pixel width of `text` in the list-view font, or `0` when unknown.
+    fn measure_text_width(&self, text: &str) -> i32 {
+        match self.results_list {
+            Some(list) => measure_list_text_width(list, text),
+            None => 0,
+        }
+    }
+
+    /// Creates (once) the bold font used for group header rows.
+    fn results_header_font(&mut self) -> Option<HFONT> {
+        if let Some(font) = self.results_header_font {
+            return Some(font);
+        }
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) };
+        let height = -(RESULT_HEADER_FONT_POINTS * dpi as i32 / POINTS_PER_INCH);
+        let face = to_wide(RESULT_HEADER_FONT_FACE);
+        // SAFETY: CreateFontW only reads the face string, which outlives the call.
+        let font = unsafe {
+            CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                FW_BOLD.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                (VARIABLE_PITCH.0 as u32) | (FF_SWISS.0 as u32),
+                PCWSTR(face.as_ptr()),
+            )
+        };
+        self.results_header_font = Some(font);
+        Some(font)
+    }
+
+    /// Refreshes the row count and repaints after a structural change.
+    fn after_results_change(&mut self) {
+        self.refresh_results_count();
+        self.repaint_results();
+        self.update_status();
     }
 
     /// Repaints the results list after a dropped display request.
@@ -853,7 +1033,7 @@ impl App {
     /// Number of rows in the active table.
     fn visible_row_count(&self) -> usize {
         match self.results_mode {
-            ResultsMode::Hits => self.session.results.len(),
+            ResultsMode::Hits => self.session.results.row_count(),
             ResultsMode::Problems => self.problems.len(),
         }
     }
@@ -2363,57 +2543,125 @@ impl App {
         self.update_status();
     }
 
-    /// Shows the results context menu for one hit row, or for the empty area
-    /// that clears the whole result set.
+    /// Shows the results context menu for a hit row, a group header or the
+    /// empty area below the rows.
     fn show_results_context_menu(&mut self, index: Option<usize>) {
-        let hits_mode = self.results_mode == ResultsMode::Hits;
-        let hit = if hits_mode {
-            index.and_then(|index| self.session.results.hit(index).copied())
-        } else {
-            None
-        };
         let Some(menu) = create_menu_or_report() else {
             return;
         };
-        // SAFETY: the popup menu is owned locally and destroyed by track_menu.
+        if self.results_mode == ResultsMode::Problems {
+            // SAFETY: the popup menu is owned locally and destroyed by track_menu.
+            unsafe {
+                append(menu, MF_STRING, ID_RESULTS_CLOSE, "Close");
+            }
+            if self.track_menu(menu) == ID_RESULTS_CLOSE {
+                self.close_results_panel();
+            }
+            return;
+        }
+        let row = index.and_then(|index| self.session.results.row(index));
+        let group = match row {
+            Some(ResultRow::Group { group }) => Some(group),
+            _ => None,
+        };
+        let hit = match row {
+            Some(ResultRow::Hit { group, hit }) => self.session.results.hit(group, hit).copied(),
+            _ => None,
+        };
+        let hit_index = match row {
+            Some(ResultRow::Hit { hit, .. }) => hit,
+            _ => NO_HIT,
+        };
+        let has_groups = !self.session.results.is_empty();
+        // SAFETY: the popup menu is owned locally and every handle stays live
+        // for the duration of the menu.
         unsafe {
             if hit.is_some() {
                 append(menu, MF_STRING, ID_RESULTS_SHOW_TEXT, "Show in Text");
-            }
-            if hits_mode {
-                append(menu, MF_STRING, ID_RESULTS_CLEAR, "Clear");
-            }
-            if hit.is_some() || hits_mode {
                 append(menu, MF_SEPARATOR, 0, "");
             }
-            append(menu, MF_STRING, ID_RESULTS_CLOSE, "Close");
+            if let Some(group) = group.and_then(|group| self.session.results.group(group)) {
+                let label = if group.is_expanded() {
+                    "Collapse"
+                } else {
+                    "Expand"
+                };
+                append(menu, MF_STRING, ID_RESULTS_TOGGLE_GROUP, label);
+            }
+            if has_groups {
+                append(menu, MF_STRING, ID_RESULTS_EXPAND_ALL, "Expand All");
+                append(menu, MF_STRING, ID_RESULTS_COLLAPSE_ALL, "Collapse All");
+                append(menu, MF_SEPARATOR, 0, "");
+            }
+            if group.is_some() {
+                append(menu, MF_STRING, ID_RESULTS_REMOVE_GROUP, "Remove This Result");
+            }
+            if has_groups {
+                append(menu, MF_STRING, ID_RESULTS_REMOVE_ALL, "Remove All");
+            }
         }
-        let command = self.track_menu(menu);
-        match command {
+        if !has_groups {
+            // Nothing to act on: drop the empty menu instead of showing it.
+            unsafe {
+                let _ = DestroyMenu(menu);
+            }
+            return;
+        }
+        match self.track_menu(menu) {
             ID_RESULTS_SHOW_TEXT => {
-                let (Some(index), Some(hit)) = (index, hit) else {
+                let Some(hit) = hit else {
                     return;
                 };
                 if self.session.layout == ViewLayout::Hex {
                     self.set_layout(ViewLayout::Text);
                 }
-                self.hit_cursor = index.saturating_add(1);
+                self.hit_cursor = hit_index.saturating_add(1);
                 self.navigate_to(&hit, true);
             }
-            ID_RESULTS_CLEAR => {
-                self.clear_results();
-                self.status_message = "Search results cleared".to_owned();
-                self.update_status();
+            ID_RESULTS_TOGGLE_GROUP => {
+                if let Some(group) = group {
+                    self.session.results.toggle_group(group);
+                    self.after_results_change();
+                }
             }
-            ID_RESULTS_CLOSE => self.close_results_panel(),
+            ID_RESULTS_EXPAND_ALL => {
+                self.session.results.set_all_expanded(true);
+                self.after_results_change();
+            }
+            ID_RESULTS_COLLAPSE_ALL => {
+                self.session.results.set_all_expanded(false);
+                self.after_results_change();
+            }
+            ID_RESULTS_REMOVE_GROUP => {
+                if let Some(group) = group {
+                    // Removing the group a running job feeds would leave the
+                    // worker writing into a table the user just discarded.
+                    if Some(group) == self.session.results.newest_index()
+                        && self.session.results.has_running()
+                    {
+                        self.cancel_search();
+                    }
+                    self.session.results.remove_group(group);
+                    self.hit_cursor = NO_HIT;
+                    self.apply_search_highlights();
+                    self.after_results_change();
+                }
+            }
+            ID_RESULTS_REMOVE_ALL => {
+                self.cancel_search();
+                self.session.results.clear();
+                self.hit_cursor = NO_HIT;
+                self.clear_search_highlights();
+                self.after_results_change();
+            }
             _ => {}
         }
     }
 
     /// Closes the results panel and returns to the plain text layout.
     ///
-    /// Collected hits are kept, so reopening the panel through View > Results
-    /// shows them again; use Clear to drop them.
+    /// Collected groups are kept, so reopening the panel through View > Results
+    /// shows them again; Remove All drops them.
     fn close_results_panel(&mut self) {
         if self.float_frame.is_some() {
             self.dock_results();
@@ -2426,24 +2674,12 @@ impl App {
     }
 
     fn mark_buffer_dirty(&mut self) {
-        // Hits collected before this edit point at offsets that may no longer
-        // exist, and the text they described is gone, so drop them instead of
-        // leaving a stale list the next Find All would appear to confirm.
-        self.clear_results();
+        // Collected results stay visible across edits; only the offsets of the
+        // edited lines may drift, which the user accepted in exchange for
+        // keeping several searches to compare.
         self.session.write(|document| {
             rnotepad_core::document::Document::mark_dirty(document);
         });
-    }
-
-    /// Drops every hit and its highlights, leaving the results panel empty.
-    fn clear_results(&mut self) {
-        self.cancel_search();
-        self.session.results.clear();
-        self.hit_cursor = NO_HIT;
-        self.clear_search_highlights();
-        if self.results_mode == ResultsMode::Hits {
-            self.refresh_results_count();
-        }
     }
 
     /// Removes search highlights from every view without touching the hits.
@@ -2601,6 +2837,16 @@ impl App {
         self.layout();
     }
 
+    /// Hides the find bar and the results panel it drove.
+    ///
+    /// The collected groups are kept, so View > Results shows them again.
+    fn close_find_bar(&mut self) {
+        self.toggle_find_bar(false);
+        if self.session.layout == ViewLayout::TextAndResults || self.float_frame.is_some() {
+            self.close_results_panel();
+        }
+    }
+
     /// Shows the find bar, seeding the pattern field from the selection.
     fn open_find(&mut self) {
         self.prefill_find_pattern();
@@ -2644,13 +2890,13 @@ impl App {
             Some((start, stop)) => {
                 self.status_message = format!(
                     "Match at bytes {start}..{stop} ({} occurrences in the panel)",
-                    self.session.results.len()
+                    self.session.results.hit_count()
                 );
             }
             None => {
                 if self.text.is_some() {
                     self.status_message = format!("No match for \"{pattern}\"");
-                } else if !self.session.results.is_empty() {
+                } else if self.session.results.hit_count() > 0 {
                     self.jump_to_next_hit();
                     return;
                 } else {
@@ -2741,14 +2987,18 @@ impl App {
             (guard.id, guard.revision)
         };
         self.problems.clear();
-        self.session.results = ResultsModel::start(doc_id, revision);
+        // A cancelled job leaves its unfinished group behind; drop it so the
+        // panel never keeps a header that will not receive more hits.
+        self.session.results.remove_incomplete();
+        // Fold the older groups so the fresh result set owns the panel instead
+        // of competing with already expanded hit lists.
+        self.session.results.set_all_expanded(false);
+        self.session
+            .results
+            .start_group(pattern.clone(), doc_id, revision);
         self.hit_cursor = NO_HIT;
         self.set_results_mode(ResultsMode::Hits);
-        if let Some(list) = self.ensure_results_list() {
-            unsafe {
-                SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0)));
-            }
-        }
+        self.refresh_results_count();
         let query = SearchQuery {
             pattern: pattern.clone(),
             mode: SearchMode::Literal,
@@ -2762,6 +3012,9 @@ impl App {
             show_window(bar.cancel, bar.visible);
         }
         self.layout();
+        // New groups are appended below the existing ones, so scroll to the
+        // header of the group that just started.
+        self.reveal_newest_group();
         self.update_status();
     }
 
@@ -2777,9 +3030,9 @@ impl App {
     fn cancel_search_from_ui(&mut self) {
         if self.job.is_some() {
             self.cancel_search();
-            self.session.results.finish();
+            self.session.results.finish_newest();
             self.status_message = "Search cancelled".to_owned();
-            self.update_status();
+            self.after_results_change();
         }
     }
 
@@ -2938,16 +3191,17 @@ impl App {
                     self.status_message = format!("Searching… {done_bytes}/{total} bytes");
                 }
                 rnotepad_core::search::TaskEvent::Hits(hits) => {
-                    self.session.results.push(&hits);
+                    self.session.results.push_hits(&hits);
                     changed = true;
                 }
                 rnotepad_core::search::TaskEvent::Done => {
-                    self.session.results.finish();
+                    self.session.results.finish_newest();
                     self.status_message =
-                        format!("{} matches", self.session.results.len());
+                        format!("{} matches", self.session.results.hit_count());
                     done = true;
                 }
                 rnotepad_core::search::TaskEvent::Failed(message) => {
+                    self.session.results.finish_newest();
                     self.status_message = format!("Search failed: {message}");
                     done = true;
                 }
@@ -2963,6 +3217,9 @@ impl App {
             if let Some(bar) = self.find.as_ref() {
                 show_window(bar.cancel, false);
             }
+            // The count updates keep the scroll offset, so the header that was
+            // revealed when the search started is still in place; re-scrolling
+            // here would only yank the view after the rows are final.
         }
         if changed || done {
             self.update_status();
@@ -2972,14 +3229,33 @@ impl App {
     fn refresh_results_count(&mut self) {
         if let Some(list) = self.results_list {
             let len = self.visible_row_count();
+            // Hits are appended while a search streams, so the item count grows
+            // every poll.  Without LVSICF_NOSCROLL the control repositions its
+            // scroll offset on each change, which makes the rows (and the group
+            // header in particular) jump around while results arrive.
             unsafe {
                 SendMessageW(
                     list,
                     LVM_SETITEMCOUNT,
                     Some(WPARAM(len)),
-                    Some(LPARAM(0)),
+                    Some(LPARAM(LVSICF_NOSCROLL as isize)),
                 );
             }
+        }
+    }
+
+    /// Scrolls the header of the newest group into view.
+    ///
+    /// Groups are appended below the existing rows, so without this the search
+    /// that just started would sit below the visible part of the list.
+    fn reveal_newest_group(&mut self) {
+        let header_row = self.session.results.newest_header_row();
+        let (Some(list), Some(row)) = (self.results_list, header_row) else {
+            return;
+        };
+        // SAFETY: the message only scrolls this app's own list view.
+        unsafe {
+            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
         }
     }
 
@@ -2987,7 +3263,7 @@ impl App {
         let ranges: Vec<std::ops::Range<u64>> = self
             .session
             .results
-            .hits()
+            .active_hits()
             .iter()
             .map(|hit| hit.raw_offset..hit.raw_offset.saturating_add(u64::from(hit.match_len)))
             .collect();
@@ -3007,7 +3283,7 @@ impl App {
                 let positions: Vec<(usize, usize)> = self
                     .session
                     .results
-                    .hits()
+                    .active_hits()
                     .iter()
                     .take(MAX_SCI_HIGHLIGHTS)
                     .filter_map(|hit| {
@@ -3027,14 +3303,20 @@ impl App {
     }
 
     fn jump_to_next_hit(&mut self) {
-        let len = self.session.results.len();
-        if len == 0 {
-            self.start_find_all();
-            return;
-        }
-        let index = self.hit_cursor % len;
-        self.hit_cursor = (index + 1) % len;
-        if let Some(hit) = self.session.results.hit(index).copied() {
+        let hit = {
+            let hits = self.session.results.active_hits();
+            let len = hits.len();
+            if len == 0 {
+                if self.session.results.hit_count() == 0 {
+                    self.start_find_all();
+                }
+                return;
+            }
+            let index = self.hit_cursor % len;
+            self.hit_cursor = (index + 1) % len;
+            hits.get(index).copied()
+        };
+        if let Some(hit) = hit {
             self.navigate_to(&hit, true);
         }
     }
@@ -3841,12 +4123,12 @@ impl App {
         };
         let mut fields = statusbar::fields(&info);
         let results = &self.session.results;
-        if !results.is_empty() && (results.is_stale() || !results.is_complete()) {
-            let count = results.len();
-            let label = if results.is_stale() {
-                format!("{count} results (stale)")
+        if results.hit_count() > 0 {
+            let count = results.hit_count();
+            let label = if results.has_running() {
+                format!("{count} matches (searching…)")
             } else {
-                format!("{count} results")
+                format!("{count} matches")
             };
             fields[statusbar::FIELD_PROGRESS] = label;
         }
@@ -4153,7 +4435,7 @@ impl App {
             ID_FIND_ALL_BUTTON => self.start_find_all(),
             ID_FIND_REPLACE_ONE => self.replace_one(),
             ID_FIND_REPLACE_BUTTON => self.replace_all(),
-            ID_FIND_CLOSE => self.toggle_find_bar(false),
+            ID_FIND_CLOSE => self.close_find_bar(),
             ID_FIND_CANCEL => self.cancel_search_from_ui(),
             ID_FILE_RECENT_PIN => self.toggle_pin_current(),
             other => {
@@ -4186,10 +4468,13 @@ impl App {
         }
     }
 
-    fn on_notify(&mut self, lparam: LPARAM) {
+    /// Dispatches one `WM_NOTIFY`.
+    ///
+    /// The return value carries the custom-draw decision back to the list view.
+    fn on_notify(&mut self, lparam: LPARAM) -> LRESULT {
         let header = lparam.0 as *const NMHDR;
         if header.is_null() {
-            return;
+            return LRESULT(0);
         }
         // SAFETY: WM_NOTIFY always carries a valid NMHDR header.
         let header = unsafe { &*header };
@@ -4213,35 +4498,68 @@ impl App {
                                 }
                             }
                         }
-                        return;
+                        return LRESULT(0);
                     }
                     SCN_UPDATEUI_CODE => {
                         self.sync_hex_from_text();
-                        return;
+                        return LRESULT(0);
                     }
                     SCN_ZOOM_CODE => {
                         self.apply_text_zoom();
-                        return;
+                        return LRESULT(0);
                     }
                     _ => {}
                 }
             }
+        }
+        if header.code == NM_CUSTOMDRAW && Some(header.hwndFrom) == self.results_list {
+            return self.on_results_custom_draw(lparam);
         }
         if header.code == LVN_GETDISPINFOW {
             // SAFETY: the control sent LVN_GETDISPINFOW, which carries an
             // NMLVDISPINFOW structure.
             let info = lparam.0 as *mut NMLVDISPINFOW;
             if info.is_null() {
-                return;
+                return LRESULT(0);
             }
             let index = unsafe { (*info).item.iItem };
             let sub = unsafe { (*info).item.iSubItem };
+            // Owner-data value handed back to notifications; the custom-draw
+            // handler falls back to it when the control does not pass a row
+            // index in dwItemSpec.
+            unsafe {
+                (*info).item.lParam = LPARAM(index as isize);
+            }
             let row_index = usize::try_from(index).unwrap_or(usize::MAX);
             let text = match self.results_mode {
                 ResultsMode::Hits => match self.session.results.row(row_index) {
-                    Some(row) if sub == 0 => format!("{}", row.line),
-                    Some(row) if sub == 1 => format!("{}", row.column),
-                    Some(_) => self.hit_preview_text(row_index),
+                    // Group headers are styled by the custom-draw handler.  The
+                    // control still asks for their text, and returning it here
+                    // keeps the header readable even if custom drawing is not
+                    // delivered for this control instance.
+                    Some(ResultRow::Group { group }) => self
+                        .session
+                        .results
+                        .group(group)
+                        .map(|group| match sub {
+                            0 => group_arrow(group).to_string(),
+                            1 => String::new(),
+                            _ => format!("{}  ({} matches)", group.query(), group.len()),
+                        })
+                        .unwrap_or_default(),
+                    Some(ResultRow::Hit { group, hit }) if sub == 0 => self
+                        .session
+                        .results
+                        .hit(group, hit)
+                        .map(|hit| hit.line_no.saturating_add(1).to_string())
+                        .unwrap_or_default(),
+                    Some(ResultRow::Hit { group, hit }) if sub == 1 => self
+                        .session
+                        .results
+                        .hit(group, hit)
+                        .map(|hit| hit.col.saturating_add(1).to_string())
+                        .unwrap_or_default(),
+                    Some(ResultRow::Hit { .. }) => self.hit_preview_text(row_index),
                     None => String::new(),
                 },
                 ResultsMode::Problems => self
@@ -4267,17 +4585,26 @@ impl App {
             // SAFETY: the control sent LVN_ITEMACTIVATE with an NMLISTVIEW.
             let info = lparam.0 as *mut NMLISTVIEW;
             if info.is_null() {
-                return;
+                return LRESULT(0);
             }
             let index = unsafe { (*info).iItem };
             if let Ok(index) = usize::try_from(index) {
                 match self.results_mode {
                     ResultsMode::Hits => {
-                        self.hit_cursor = index.saturating_add(1);
-                        if let Some(hit) = self.session.results.hit(index).copied() {
-                            // A double-click returns focus to the text view and
-                            // selects the whole match, ready for editing.
-                            self.navigate_to(&hit, true);
+                        // Group headers only toggle; hits open the match.
+                        if let Some(ResultRow::Hit {
+                            group: group_index,
+                            hit: hit_index,
+                        }) = self.session.results.row(index)
+                        {
+                            if let Some(hit) =
+                                self.session.results.hit(group_index, hit_index).copied()
+                            {
+                                self.hit_cursor = hit_index.saturating_add(1);
+                                // A double-click returns focus to the text view
+                                // and selects the whole match for editing.
+                                self.navigate_to(&hit, true);
+                            }
                         }
                     }
                     ResultsMode::Problems => {
@@ -4287,20 +4614,119 @@ impl App {
                     }
                 }
             }
+        } else if header.code == NM_CLICK {
+            // SAFETY: list views send NM_CLICK with an NMLISTVIEW-compatible
+            // structure; clicking a group header folds or unfolds it.
+            let info = lparam.0 as *mut NMLISTVIEW;
+            if info.is_null() {
+                return LRESULT(0);
+            }
+            if self.results_mode == ResultsMode::Hits {
+                if let Ok(index) = usize::try_from(unsafe { (*info).iItem }) {
+                    if let Some(ResultRow::Group { group }) = self.session.results.row(index) {
+                        self.session.results.toggle_group(group);
+                        self.after_results_change();
+                    }
+                }
+            }
         } else if header.code == NM_RCLICK {
             // SAFETY: list views send NM_RCLICK with an NMLISTVIEW-compatible
             // structure; the first fields match NMITEMACTIVATE.
             let info = lparam.0 as *mut NMLISTVIEW;
             if info.is_null() {
-                return;
+                return LRESULT(0);
             }
             if let Ok(index) = usize::try_from(unsafe { (*info).iItem }) {
                 self.show_results_context_menu(Some(index));
             } else {
-                // Right-clicking the empty area still offers "Clear".
+                // Right-clicking the empty area still offers the bulk commands.
                 self.show_results_context_menu(None);
             }
         }
+        LRESULT(0)
+    }
+
+    /// Paints collapsible group headers in the results list.
+    ///
+    /// A `LVS_OWNERDATA` report list cannot host native groups and has no
+    /// per-row colour, so the header row is drawn here: the control is asked to
+    /// skip its default drawing and the full row width is painted instead.
+    fn on_results_custom_draw(&mut self, lparam: LPARAM) -> LRESULT {
+        let info = lparam.0 as *mut NMLVCUSTOMDRAW;
+        if info.is_null() {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        }
+        let stage = unsafe { (*info).nmcd.dwDrawStage };
+        if stage == CDDS_PREPAINT {
+            return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+        }
+        if stage != CDDS_ITEMPREPAINT || self.results_mode != ResultsMode::Hits {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        }
+        let mut row = unsafe { (*info).nmcd.dwItemSpec };
+        let row_count = self.session.results.row_count();
+        if row >= row_count {
+            // An owner-data list view may pass the item lParam rather than the
+            // index here; LVN_GETDISPINFO stores the index there so both
+            // interpretations resolve to the same row.
+            let param = unsafe { (*info).nmcd.lItemlParam.0 } as usize;
+            if param < row_count {
+                row = param;
+            }
+        }
+        let Some(ResultRow::Group { group }) = self.session.results.row(row) else {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        };
+        let Some(model_group) = self.session.results.group(group) else {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        };
+        let label = group_header_label(model_group);
+        let font = self.results_header_font();
+        let hdc = unsafe { (*info).nmcd.hdc };
+        let client = self.results_client_rect();
+        // The rectangle reported at the item stage is not reliably filled in
+        // for report list views, so ask the control for the row bounds.
+        let mut row_rect = self
+            .results_row_rect(row)
+            .unwrap_or(unsafe { (*info).nmcd.rc });
+        if row_rect.right <= row_rect.left || row_rect.bottom <= row_rect.top {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        }
+        // Widen the header so it spans every column of the row.
+        row_rect.left = client.left;
+        row_rect.right = client.right;
+        // SAFETY: `hdc` belongs to the control's paint cycle; the saved state
+        // restores clip, font and colours afterwards.
+        unsafe {
+            let saved = SaveDC(hdc);
+            let _ = SelectClipRgn(hdc, None);
+            let _ =
+                IntersectClipRect(hdc, client.left, client.top, client.right, client.bottom);
+            let brush = CreateSolidBrush(COLORREF(GetSysColor(COLOR_BTNFACE)));
+            FillRect(hdc, &row_rect, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+            if let Some(font) = font {
+                SelectObject(hdc, HGDIOBJ(font.0));
+            }
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, COLORREF(GetSysColor(COLOR_BTNTEXT)));
+            let mut text_rect = RECT {
+                left: row_rect.left + RESULT_HEADER_INDENT,
+                right: (row_rect.right - RESULT_HEADER_INDENT).max(row_rect.left),
+                ..row_rect
+            };
+            let mut wide = to_wide(&label);
+            let flags = DRAW_TEXT_FORMAT(
+                DT_SINGLELINE.0
+                    | DT_VCENTER.0
+                    | DT_LEFT.0
+                    | DT_NOPREFIX.0
+                    | DT_END_ELLIPSIS.0,
+            );
+            DrawTextW(hdc, &mut wide, &mut text_rect, flags);
+            let _ = RestoreDC(hdc, saved);
+        }
+        LRESULT(CDRF_SKIPDEFAULT as isize)
     }
 
     fn show_message(&self, icon: MESSAGEBOX_STYLE, caption: &str, text: &str) {
@@ -4342,6 +4768,11 @@ impl App {
             }
         }
         if let Some(font) = self.status_font.take() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(font.0));
+            }
+        }
+        if let Some(font) = self.results_header_font.take() {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(font.0));
             }
@@ -4474,11 +4905,12 @@ fn create_child(
 
 /// Builds the preview shown in the Text column for one search hit.
 ///
-/// The matched text stays inside the preview and the whole preview is capped
-/// at [`RESULT_PREVIEW_CHARS`] characters, so a long line cannot push the
-/// match out of the cell.  Only bytes around the hit are read, keeping
+/// `budget` is the number of characters whose glyphs fit in the column.  The
+/// leading context takes a third of it, so the reader sees what precedes the
+/// match, while the remainder keeps the match and its tail visible without a
+/// horizontal scrollbar.  Only bytes around the hit are read, keeping
 /// owner-data painting cheap even for very long lines.
-fn line_preview(document: &Document, hit: &MatchHit) -> String {
+fn line_preview(document: &Document, hit: &MatchHit, budget: usize) -> String {
     if document.id != hit.doc_id {
         return String::new();
     }
@@ -4512,18 +4944,21 @@ fn line_preview(document: &Document, hit: &MatchHit) -> String {
     }
     let body = body.trim_end_matches(|ch| ch == '\r' || ch == '\n');
 
+    let lead_target = (budget / RESULT_PREVIEW_LEAD_DIVISOR)
+        .clamp(RESULT_PREVIEW_LEAD_MIN_CHARS, RESULT_PREVIEW_LEAD_MAX_CHARS);
+    let lead_chars = lead_target.min(budget.saturating_sub(RESULT_PREVIEW_MATCH_RESERVE_CHARS));
     let prefix_chars = prefix.chars().count();
-    let lead_chars = prefix_chars.min(RESULT_PREVIEW_LEAD_CHARS);
+    let lead_taken = prefix_chars.min(lead_chars);
     let lead: String = prefix
         .chars()
-        .skip(prefix_chars.saturating_sub(lead_chars))
+        .skip(prefix_chars.saturating_sub(lead_taken))
         .collect();
-    let available = RESULT_PREVIEW_CHARS.saturating_sub(lead_chars);
+    let available = budget.saturating_sub(lead_taken);
     let body_chars = body.chars().count();
     let taken: String = body.chars().take(available).collect();
 
     let mut preview = String::new();
-    if prefix_start > line_range.start || prefix_chars > lead_chars {
+    if prefix_start > line_range.start || prefix_chars > lead_taken {
         preview.push(RESULT_PREVIEW_ELLIPSIS);
     }
     preview.push_str(&lead);
@@ -4532,6 +4967,90 @@ fn line_preview(document: &Document, hit: &MatchHit) -> String {
         preview.push(RESULT_PREVIEW_ELLIPSIS);
     }
     preview
+}
+
+/// Fold arrow shown in a group header.
+fn group_arrow(group: &ResultGroup) -> char {
+    if group.is_expanded() {
+        RESULT_HEADER_EXPANDED_GLYPH
+    } else {
+        RESULT_HEADER_COLLAPSED_GLYPH
+    }
+}
+
+/// Header text of one result group: fold arrow, pattern and hit count.
+fn group_header_label(group: &ResultGroup) -> String {
+    let glyph = group_arrow(group);
+    let plural = if group.len() == 1 { "" } else { "es" };
+    if group.is_complete() {
+        format!("{glyph}  {}   ({} match{plural})", group.query(), group.len())
+    } else {
+        format!(
+            "{glyph}  {}   ({} match{plural}, searching…)",
+            group.query(),
+            group.len()
+        )
+    }
+}
+
+/// Selects the list-view font into `hdc`.
+///
+/// Returns the replaced object so the caller can restore it before releasing
+/// the device context.
+///
+/// # Safety
+///
+/// `hdc` must be a valid device context acquired from `GetDC`.
+unsafe fn select_list_font(hdc: HDC, list: HWND) -> HGDIOBJ {
+    let font = SendMessageW(list, WM_GETFONT, None, None);
+    if font.0 != 0 {
+        SelectObject(hdc, HGDIOBJ(font.0 as *mut core::ffi::c_void))
+    } else {
+        SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT))
+    }
+}
+
+/// Pixel width of `text` in the list-view font.
+///
+/// Returns `0` when the width cannot be measured, which callers treat as
+/// "fits" so a failed measurement never hides the text.
+fn measure_list_text_width(list: HWND, text: &str) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    // SAFETY: `list` is a live window; the font and device context are
+    // restored before the context is released.
+    unsafe {
+        let hdc = GetDC(Some(list));
+        if hdc.is_invalid() {
+            return 0;
+        }
+        let previous = select_list_font(hdc, list);
+        let wide = to_wide(text);
+        let mut extent = SIZE::default();
+        let measured = GetTextExtentPoint32W(hdc, &wide, &mut extent).as_bool();
+        if !previous.0.is_null() {
+            SelectObject(hdc, previous);
+        }
+        ReleaseDC(Some(list), hdc);
+        if measured {
+            extent.cx
+        } else {
+            0
+        }
+    }
+}
+
+/// Average advance width of the list-view font, in physical pixels.
+///
+/// Returns `0` when the device context cannot be queried, so callers fall back
+/// to a character budget instead of dividing by zero.
+fn measure_list_char_width(list: HWND) -> i32 {
+    let width = measure_list_text_width(list, RESULT_MEASURE_SAMPLE);
+    if width <= 0 {
+        return 0;
+    }
+    (width / RESULT_MEASURE_SAMPLE.chars().count().max(1) as i32).max(1)
 }
 
 /// Decodes a raw byte span with the document charset.
@@ -4888,7 +5407,7 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
             ID_FORMAT_XML_DIAGNOSTIC,
             "Validate XML Config",
         );
-        menu_popup(menu, config, "Config");
+        menu_popup(menu, config, "Format");
 
         let help = CreatePopupMenu().map_err(|err| err.to_string())?;
         append(help, MF_STRING, ID_HELP_ENABLE_LOG, "Enable Logging");
@@ -5176,8 +5695,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
                 request_results_repaint(hwnd, lparam);
             }
             let code = lparam;
-            with_app(hwnd, |app| app.on_notify(code));
-            LRESULT(0)
+            with_app_result(hwnd, |app| app.on_notify(code)).unwrap_or(LRESULT(0))
         }
         WM_APP_VIEW_SYNC => {
             let tag = wparam.0;
