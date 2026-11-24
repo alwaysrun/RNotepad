@@ -7,7 +7,7 @@
 use std::sync::RwLock;
 
 use crossbeam_channel::Receiver;
-use rnotepad_core::search::{CancelToken, CoreSearchService, SearchQuery, SearchService, TaskEvent};
+use rnotepad_core::search::{CancelToken, CompiledQuery, CoreSearchService, SearchService, TaskEvent};
 use tracing::{error, info};
 
 use crate::session::SharedDoc;
@@ -22,11 +22,11 @@ pub struct SearchJob {
 impl SearchJob {
     /// Starts a search on a worker thread.
     #[must_use]
-    pub fn spawn(document: SharedDoc, query: SearchQuery) -> Self {
+    pub fn spawn(document: SharedDoc, query: CompiledQuery) -> Self {
         let cancel = CancelToken::new();
         let (sender, receiver) = crossbeam_channel::unbounded();
         let worker_cancel = cancel.clone();
-        info!(pattern = %query.pattern, mode = ?query.mode, "starting search");
+        info!(pattern = %query.source, "starting search");
         std::thread::spawn(move || {
             let guard = document
                 .read()

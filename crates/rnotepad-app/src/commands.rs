@@ -139,6 +139,8 @@ pub const ID_FORMAT_XML_DIAGNOSTIC: u32 = 1606;
 pub const ID_HELP_ABOUT: u32 = 1701;
 /// Enable or disable file logging.
 pub const ID_HELP_ENABLE_LOG: u32 = 1702;
+/// Show the quick usage guide.
+pub const ID_HELP_USAGE: u32 = 1703;
 
 /// First command id reserved for recent-file entries.
 pub const ID_FILE_RECENT_FIRST: u32 = 1901;
@@ -167,6 +169,10 @@ pub const ID_FIND_CANCEL: u32 = 2008;
 pub const ID_FIND_REPLACE_ONE: u32 = 2009;
 /// Wrap-around search checkbox.
 pub const ID_FIND_WRAP: u32 = 2010;
+/// Expression search checkbox.
+pub const ID_FIND_EXPRESSION: u32 = 2011;
+/// Whole-word checkbox.
+pub const ID_FIND_WHOLE_WORD: u32 = 2012;
 
 /// Height of the status strip.
 pub const STATUS_HEIGHT: i32 = 24;
@@ -196,6 +202,10 @@ pub const FIND_BUTTON_WIDTH: i32 = 80;
 pub const FIND_CASE_WIDTH: i32 = 56;
 /// Width of the wrap-around checkbox.
 pub const FIND_WRAP_WIDTH: i32 = 56;
+/// Width of the expression-search checkbox.
+pub const FIND_EXPRESSION_WIDTH: i32 = 52;
+/// Width of the whole-word checkbox.
+pub const FIND_WHOLE_WORD_WIDTH: i32 = 56;
 /// Height of one row in the pattern dropdown list.
 pub const FIND_DROPDOWN_ROW_HEIGHT: i32 = 20;
 /// Rows the pattern dropdown shows before it scrolls.

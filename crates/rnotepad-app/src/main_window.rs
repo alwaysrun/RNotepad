@@ -101,7 +101,7 @@ use rnotepad_core::encoding::{decode, encode, precheck_unmappable, BomPolicy, Ch
 use rnotepad_core::format::{
     Diagnostic, FormatKind, FormatOptions, FormatProvider, JsonFormatProvider, XmlConfigProvider,
 };
-use rnotepad_core::search::{MatchHit, SearchMode, SearchQuery};
+use rnotepad_core::search::{CompiledQuery, MatchHit, SearchMode, SearchQuery};
 
 use rnotepad_win::dw::{
     MonoFont, DEFAULT_FONT_POINTS, MAX_FONT_POINTS, MIN_FONT_POINTS, rgb,
@@ -173,6 +173,46 @@ const EXTERNAL_CHANGE_HINT: &str =
     "File changed on disk; use File > Reload to load the disk copy";
 /// Extension appended when a Save As name has none of its own.
 const SAVE_DEFAULT_EXTENSION: &str = "txt";
+/// Caption of the quick usage guide opened from the Help menu.
+const USAGE_CAPTION: &str = "Quick Usage";
+/// Short reference for the features that are not obvious from the UI.
+const USAGE_TEXT: &str = concat!(
+    "Search and replace\n",
+    "\n",
+    "- Ctrl+F opens the find bar. Next / F3 continues after the\n",
+    "  caret; Find All scans the whole file into the Results panel.\n",
+    "  Double-click a row there to jump to that match.\n",
+    "- Wrap: continue from the start of the file after reaching the\n",
+    "  end. It applies to Next, not to Find All.\n",
+    "- Case: case-sensitive matching. Off by default.\n",
+    "- Word: match whole words only, so \"cat\" skips \"catalog\".\n",
+    "\n",
+    "Expression search (tick Expr, then Find All)\n",
+    "\n",
+    "- Combine terms with AND, OR, NOT and parentheses. Adjacent\n",
+    "  terms mean AND:  error timeout  is  error AND timeout.\n",
+    "- Operators are standalone words in any case; quote a literal\n",
+    "  operator, e.g. \"and\".\n",
+    "- re: is a regex term, hex: is a raw byte term:\n",
+    "    ERROR AND re:\\d{3,}\n",
+    "    hex:\"DE AD\"\n",
+    "- All terms must match the same logical line. ^ and $ anchor\n",
+    "  on that line. Replace is disabled while Expr is on.\n",
+    "- Next / F3 walks the existing expression hits.\n",
+    "\n",
+    "Replace\n",
+    "\n",
+    "- Turn on Edit > Enable Editing first.\n",
+    "- Replace swaps the current match, or moves to the next one.\n",
+    "- Replace All rewrites every match in the buffer.\n",
+    "\n",
+    "Other\n",
+    "\n",
+    "- View > Text + Results keeps hits beside the text.\n",
+    "- View > Follow Tail follows a growing log file.\n",
+    "- Encoding changes how the current bytes are interpreted;\n",
+    "  BOM and EOL have their own menus.",
+);
 const STATUS_FONT_FACE: &str = "Segoe UI";
 const STATUS_FONT_POINTS: i32 = 9;
 const POINTS_PER_INCH: i32 = 72;
@@ -376,6 +416,10 @@ struct FindBar {
     replace_all: HWND,
     case: HWND,
     wrap: HWND,
+    /// Restricts matches to whole words.
+    whole_word: HWND,
+    /// Switches Find All to the expression syntax.
+    expression: HWND,
     close: HWND,
     cancel: HWND,
     visible: bool,
@@ -620,6 +664,10 @@ impl App {
             create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_REPLACE_BUTTON);
         let case = create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_CASE);
         let wrap = create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_WRAP);
+        let whole_word =
+            create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_WHOLE_WORD);
+        let expression =
+            create_child(self.hwnd, w!("BUTTON"), CHECKBOX_STYLE, ID_FIND_EXPRESSION);
         let close = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CLOSE);
         let cancel = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CANCEL);
         let (
@@ -629,9 +677,22 @@ impl App {
             Ok(replace_all),
             Ok(case),
             Ok(wrap),
+            Ok(whole_word),
+            Ok(expression),
             Ok(close),
             Ok(cancel),
-        ) = (next, all, replace_one, replace_all, case, wrap, close, cancel)
+        ) = (
+            next,
+            all,
+            replace_one,
+            replace_all,
+            case,
+            wrap,
+            whole_word,
+            expression,
+            close,
+            cancel,
+        )
         else {
             self.status_message = "Creating find-bar controls failed".to_owned();
             return;
@@ -644,6 +705,8 @@ impl App {
         set_text(replace_all, "Replace All");
         set_text(case, "Case");
         set_text(wrap, "Wrap");
+        set_text(whole_word, "Word");
+        set_text(expression, "Expr");
         set_text(close, "X");
         set_text(cancel, "Stop");
         unsafe {
@@ -681,6 +744,8 @@ impl App {
             replace_all,
             case,
             wrap,
+            whole_word,
+            expression,
             close,
             cancel,
             visible: false,
@@ -1391,8 +1456,10 @@ impl App {
             - FIND_BUTTON_WIDTH * 2
             - FIND_CASE_WIDTH
             - FIND_WRAP_WIDTH
+            - FIND_WHOLE_WORD_WIDTH
+            - FIND_EXPRESSION_WIDTH
             - FIND_CLOSE_WIDTH
-            - FIND_ROW_GAP * 6)
+            - FIND_ROW_GAP * 8)
             .max(0);
         let edit_width = available;
         // The combo height covers its closed field plus the drop list; the
@@ -1411,8 +1478,12 @@ impl App {
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.all, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
+        move_control(bar.expression, x, row_one, FIND_EXPRESSION_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_EXPRESSION_WIDTH + FIND_ROW_GAP;
         move_control(bar.case, x, row_one, FIND_CASE_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_CASE_WIDTH + FIND_ROW_GAP;
+        move_control(bar.whole_word, x, row_one, FIND_WHOLE_WORD_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_WHOLE_WORD_WIDTH + FIND_ROW_GAP;
         move_control(bar.wrap, x, row_one, FIND_WRAP_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_WRAP_WIDTH + FIND_ROW_GAP;
         move_control(bar.close, x, row_one, FIND_CLOSE_WIDTH, FIND_ROW_HEIGHT);
@@ -2807,6 +2878,24 @@ impl App {
         state.0 == BST_CHECKED.0 as isize
     }
 
+    /// `true` when Find All parses the pattern as an expression.
+    fn find_expression_enabled(&self) -> bool {
+        let Some(bar) = self.find.as_ref() else {
+            return false;
+        };
+        let state = unsafe { SendMessageW(bar.expression, BM_GETCHECK, None, None) };
+        state.0 == BST_CHECKED.0 as isize
+    }
+
+    /// `true` when matches must span whole words only.
+    fn find_whole_word_enabled(&self) -> bool {
+        let Some(bar) = self.find.as_ref() else {
+            return false;
+        };
+        let state = unsafe { SendMessageW(bar.whole_word, BM_GETCHECK, None, None) };
+        state.0 == BST_CHECKED.0 as isize
+    }
+
     /// `true` when Find Next may continue from the other end of the buffer.
     fn find_wrap_enabled(&self) -> bool {
         let Some(bar) = self.find.as_ref() else {
@@ -2871,13 +2960,30 @@ impl App {
             self.update_status();
             return;
         };
+        // Expressions describe lines, not findable spans, so next-step
+        // navigation walks the collected hits instead of the editor buffer.
+        if self.find_expression_enabled() {
+            self.remember_search(&pattern);
+            let current = self
+                .session
+                .results
+                .newest()
+                .is_some_and(|group| group.query() == pattern.as_str() && group.is_complete());
+            if current && self.session.results.hit_count() > 0 {
+                self.jump_to_next_hit();
+            } else {
+                self.start_find_all();
+            }
+            return;
+        }
         let case = self.find_case_sensitive();
+        let whole_word = self.find_whole_word_enabled();
         let wrap = self.find_wrap_enabled();
         self.remember_search(&pattern);
         let found = if let Some(TextHandle::Scintilla(control)) = &self.text {
             let (_, end) = control.selection();
             let from = if end == 0 { 0 } else { end };
-            let hit = control.find(&pattern, case, false, false, from, wrap);
+            let hit = control.find(&pattern, case, whole_word, false, from, wrap);
             if let Some((start, stop)) = hit {
                 control.set_selection(start, stop);
                 control.focus();
@@ -2968,6 +3074,27 @@ impl App {
             self.update_status();
             return;
         };
+        // Compile before touching the running job or the document so a syntax
+        // error leaves the current result set intact.
+        let case = self.find_case_sensitive();
+        let whole_word = self.find_whole_word_enabled();
+        let query = if self.find_expression_enabled() {
+            match CompiledQuery::parse_with_options(&pattern, case, whole_word) {
+                Ok(query) => query,
+                Err(err) => {
+                    self.status_message = format!("Invalid search expression: {err}");
+                    self.update_status();
+                    return;
+                }
+            }
+        } else {
+            CompiledQuery::term(SearchQuery {
+                pattern: pattern.clone(),
+                mode: SearchMode::Literal,
+                case_sensitive: case,
+                whole_word,
+            })
+        };
         // Stop any job still holding the document before it is rewritten.
         self.cancel_search();
         // The search reads the shared document, which only changes on save;
@@ -2999,12 +3126,6 @@ impl App {
         self.hit_cursor = NO_HIT;
         self.set_results_mode(ResultsMode::Hits);
         self.refresh_results_count();
-        let query = SearchQuery {
-            pattern: pattern.clone(),
-            mode: SearchMode::Literal,
-            case_sensitive: self.find_case_sensitive(),
-            whole_word: false,
-        };
         self.job = Some(SearchJob::spawn(shared, query));
         self.session.layout = ViewLayout::TextAndResults;
         self.status_message = format!("Searching \"{pattern}\"...");
@@ -3634,9 +3755,16 @@ impl App {
             self.update_status();
             return;
         };
+        if self.find_expression_enabled() {
+            self.status_message =
+                "Replace is unavailable in expression mode; clear Expr to replace".to_owned();
+            self.update_status();
+            return;
+        }
         let replacement = self.find_replacement();
         self.remember_replacement(&replacement);
         let case = self.find_case_sensitive();
+        let whole_word = self.find_whole_word_enabled();
         let wrap = self.find_wrap_enabled();
         let Some(TextHandle::Scintilla(control)) = &self.text else {
             self.status_message = "Replace needs the Scintilla text view".to_owned();
@@ -3645,10 +3773,12 @@ impl App {
         };
         let (start, end) = control.selection();
         // Replace the current match when the selection already is one; otherwise
-        // advance to the next match, which matches Find Next semantics.
-        let target = if start < end
-            && text_matches(&control.text_range(start, end), &pattern, case)
-        {
+        // advance to the next match, which matches Find Next semantics.  With
+        // whole-word matching a selection may be a mere substring, so the
+        // editor verifies the boundaries instead of comparing the texts.
+        let target = if whole_word {
+            control.find(&pattern, case, true, false, start, wrap)
+        } else if start < end && text_matches(&control.text_range(start, end), &pattern, case) {
             Some((start, end))
         } else {
             control.find(&pattern, case, false, false, end, wrap)
@@ -3666,7 +3796,7 @@ impl App {
         // hit mirrors Find Next, letting the user repeat Replace to walk through
         // the document.
         let resume_at = start.saturating_add(replacement.len());
-        let next = control.find(&pattern, case, false, false, resume_at, wrap);
+        let next = control.find(&pattern, case, whole_word, false, resume_at, wrap);
         if let Some((next_start, next_end)) = next {
             control.set_selection(next_start, next_end);
         }
@@ -3692,12 +3822,19 @@ impl App {
             self.update_status();
             return;
         };
+        if self.find_expression_enabled() {
+            self.status_message =
+                "Replace is unavailable in expression mode; clear Expr to replace".to_owned();
+            self.update_status();
+            return;
+        }
         let replacement = self.find_replacement();
         self.remember_replacement(&replacement);
         let case = self.find_case_sensitive();
+        let whole_word = self.find_whole_word_enabled();
         let count = match &self.text {
             Some(TextHandle::Scintilla(control)) => {
-                replace_all_literal(control, &pattern, &replacement, case)
+                replace_all_literal(control, &pattern, &replacement, case, whole_word)
             }
             _ => 0,
         };
@@ -4423,6 +4560,9 @@ impl App {
             ID_FORMAT_XML => self.apply_format(&XmlConfigProvider, false),
             ID_FORMAT_XML_MINIFY => self.apply_format(&XmlConfigProvider, true),
             ID_FORMAT_XML_DIAGNOSTIC => self.validate_with(&XmlConfigProvider),
+            ID_HELP_USAGE => {
+                self.show_message(MB_ICONINFORMATION, USAGE_CAPTION, USAGE_TEXT);
+            }
             ID_HELP_ABOUT => {
                 self.show_message(
                     MB_ICONINFORMATION,
@@ -4843,11 +4983,12 @@ fn replace_all_literal(
     pattern: &str,
     replacement: &str,
     case_sensitive: bool,
+    whole_word: bool,
 ) -> usize {
     let mut count = 0;
     let mut position = 0;
     while let Some((start, end)) =
-        control.find(pattern, case_sensitive, false, false, position, false)
+        control.find(pattern, case_sensitive, whole_word, false, position, false)
     {
         control.set_selection(start, end);
         control.replace_selection(replacement);
@@ -5111,6 +5252,8 @@ fn show_bar(bar: &FindBar, visible: bool) {
         bar.replace_all,
         bar.case,
         bar.wrap,
+        bar.whole_word,
+        bar.expression,
         bar.close,
         bar.cancel,
     ] {
@@ -5412,6 +5555,7 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         let help = CreatePopupMenu().map_err(|err| err.to_string())?;
         append(help, MF_STRING, ID_HELP_ENABLE_LOG, "Enable Logging");
         append(help, MF_SEPARATOR, 0, "");
+        append(help, MF_STRING, ID_HELP_USAGE, "Quick Usage");
         append(help, MF_STRING, ID_HELP_ABOUT, "About RNotepad");
         menu_popup(menu, help, "Help");
         Ok(menu)

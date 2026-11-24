@@ -18,6 +18,11 @@ use crate::coord::{CoordMap, RawByteOffset, Utf8Pos};
 use crate::document::{Document, DocumentId};
 use crate::encoding::{encode, Charset, UnmappableChar};
 
+mod expr;
+mod query;
+
+pub use query::{CompiledQuery, QueryError, QueryNode};
+
 /// Maximum number of hits delivered in one batch.
 pub const HIT_BATCH_SIZE: usize = 200;
 /// Maximum time spent accumulating a batch before flushing it.
@@ -115,6 +120,8 @@ pub enum SearchError {
     UnmappablePattern(Vec<UnmappableChar>),
     #[error("invalid hex byte pattern: {0}")]
     InvalidHex(String),
+    #[error("invalid search expression: {0}")]
+    InvalidQuery(#[from] QueryError),
     #[error("the reader is unavailable")]
     ReaderUnavailable,
 }
@@ -123,7 +130,7 @@ pub enum SearchError {
 pub trait SearchService {
     fn run(
         &self,
-        query: &SearchQuery,
+        query: &CompiledQuery,
         document: &Document,
         cancel: CancelToken,
         sink: Sender<TaskEvent>,
@@ -137,7 +144,7 @@ pub struct CoreSearchService;
 impl SearchService for CoreSearchService {
     fn run(
         &self,
-        query: &SearchQuery,
+        query: &CompiledQuery,
         document: &Document,
         cancel: CancelToken,
         sink: Sender<TaskEvent>,
@@ -146,10 +153,20 @@ impl SearchService for CoreSearchService {
     }
 }
 
-/// Runs a search and returns every hit.  Useful for tests and for small
-/// documents where batching is not needed.
+/// Runs a search for a plain pattern and returns every hit.
+///
+/// Useful for tests and for small documents where batching is not needed.
 pub fn search_all(
     query: &SearchQuery,
+    document: &Document,
+    cancel: &CancelToken,
+) -> Result<Vec<MatchHit>, SearchError> {
+    search_all_compiled(&CompiledQuery::term(query.clone()), document, cancel)
+}
+
+/// Runs a search for a compiled expression and returns every hit.
+pub fn search_all_compiled(
+    query: &CompiledQuery,
     document: &Document,
     cancel: &CancelToken,
 ) -> Result<Vec<MatchHit>, SearchError> {
@@ -167,7 +184,7 @@ pub fn search_all(
 }
 
 fn run_search(
-    query: &SearchQuery,
+    query: &CompiledQuery,
     document: &Document,
     cancel: &CancelToken,
     sink: &Sender<TaskEvent>,
@@ -176,16 +193,27 @@ fn run_search(
     let mut total = 0u64;
     let mut batcher = HitBatcher::new(document.id, document.revision, sink.clone());
 
-    if query.pattern.is_empty() {
+    if query.source.is_empty() {
         return Err(SearchError::EmptyPattern);
     }
 
-    let result = if query.mode == SearchMode::HexBytes {
-        search_hex(query, document, cancel, sink, &mut batcher, &mut total)
-    } else if query.mode == SearchMode::Literal && query.case_sensitive && !query.whole_word {
-        search_literal_raw(query, document, cancel, sink, &mut batcher, &mut total)
-    } else {
-        search_text(query, document, cancel, sink, &mut batcher, &mut total)
+    let result = match query.single_term() {
+        Some(term) if term.mode == SearchMode::HexBytes => {
+            search_hex(term, document, cancel, sink, &mut batcher, &mut total)
+        }
+        Some(term) if term.mode == SearchMode::Literal && term.case_sensitive && !term.whole_word => {
+            search_literal_raw(term, document, cancel, sink, &mut batcher, &mut total)
+        }
+        Some(term) => search_text(term, document, cancel, sink, &mut batcher, &mut total),
+        None => {
+            let mut emit = |raw: u64, len: u64| -> Result<(), SearchError> {
+                let hit = batcher.make_hit(document, raw, len);
+                batcher.push(hit)?;
+                total += 1;
+                Ok(())
+            };
+            expr::run(query, document, cancel, sink, &mut emit)
+        }
     };
 
     batcher.flush()?;
@@ -261,7 +289,7 @@ impl HitBatcher {
     }
 }
 
-fn report_progress(sink: &Sender<TaskEvent>, done: u64, total: u64) {
+pub(crate) fn report_progress(sink: &Sender<TaskEvent>, done: u64, total: u64) {
     let _ = sink.send(TaskEvent::Progress(done, total));
 }
 
@@ -426,7 +454,7 @@ fn decode_window_text(document: &Document, window: &[u8]) -> String {
     crate::encoding::decode(window, document.encoding.charset, 0).text
 }
 
-fn build_text_regex(query: &SearchQuery) -> Result<regex::Regex, SearchError> {
+pub(crate) fn build_text_regex(query: &SearchQuery) -> Result<regex::Regex, SearchError> {
     let pattern = if query.mode == SearchMode::Literal {
         regex::escape(&query.pattern)
     } else {
@@ -543,6 +571,21 @@ mod tests {
     }
 
     #[test]
+    fn whole_word_search_ignores_case_by_default() {
+        let doc = doc(b"Cat catalog CAT");
+        let query = SearchQuery {
+            pattern: "cat".to_owned(),
+            mode: SearchMode::Literal,
+            case_sensitive: false,
+            whole_word: true,
+        };
+        let hits = search_all(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].raw_offset, 0);
+        assert_eq!(hits[1].raw_offset, 12);
+    }
+
+    #[test]
     fn hex_search_finds_bytes() {
         let doc = doc(&[0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x00]);
         let query = SearchQuery {
@@ -612,5 +655,80 @@ mod tests {
         let raw = RawBytes::from_vec(vec![1, 2, 3]);
         let clone = raw.clone();
         assert_eq!(clone.len(), 3);
+    }
+
+    #[test]
+    fn expression_and_keeps_only_lines_with_both_terms() {
+        let doc = doc(b"alpha beta\nbeta only\nalpha only\n");
+        let query = CompiledQuery::parse("alpha AND beta", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_no, 0);
+        assert_eq!(hits[0].raw_offset, 0);
+        assert_eq!(hits[0].match_len, 10);
+    }
+
+    #[test]
+    fn expression_or_reports_every_matching_line() {
+        let doc = doc(b"alpha beta\nbeta only\nalpha only\n");
+        let query = CompiledQuery::parse("alpha OR gamma", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].line_no, 0);
+        assert_eq!(hits[1].line_no, 2);
+        // The span length must be relative to its own start, not the absolute
+        // end offset: hits on later lines otherwise select the wrong range.
+        assert_eq!(hits[1].raw_offset, 21);
+        assert_eq!(hits[1].match_len, 5);
+    }
+
+    #[test]
+    fn expression_not_excludes_lines() {
+        let doc = doc(b"alpha beta\nbeta only\nalpha only\n");
+        let query = CompiledQuery::parse("alpha AND NOT beta", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_no, 2);
+    }
+
+    #[test]
+    fn expression_negation_only_line_reports_the_whole_line() {
+        let doc = doc(b"alpha beta\nbeta only\ngamma\n");
+        let query = CompiledQuery::parse("alpha OR NOT beta", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].line_no, 2);
+        assert_eq!(hits[1].raw_offset, 21);
+        assert_eq!(hits[1].match_len, 6);
+    }
+
+    #[test]
+    fn expression_supports_regex_terms() {
+        let doc = doc(b"value 42\nvalue abc\n");
+        let query = CompiledQuery::parse(r"value AND re:\d+", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_no, 0);
+    }
+
+    #[test]
+    fn expression_regex_anchors_on_logical_lines() {
+        let doc = doc(b"alpha\nbeta\n");
+        let query = CompiledQuery::parse(r"re:alpha$ AND NOT zzz", false).unwrap();
+        let hits = search_all_compiled(&query, &doc, &CancelToken::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line_no, 0);
+    }
+
+    #[test]
+    fn expression_rejects_invalid_syntax() {
+        assert!(matches!(
+            CompiledQuery::parse("(alpha", false),
+            Err(QueryError::ExpectedCloseParen { .. })
+        ));
+        assert!(matches!(
+            CompiledQuery::parse("NOT alpha", false),
+            Err(QueryError::NoPositiveTerm)
+        ));
     }
 }
