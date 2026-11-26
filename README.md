@@ -5,6 +5,8 @@ RNotepad pairs a pure-Rust data engine with a thin Win32 shell and a vendored
 Scintilla 5.6.9 editing surface, so it can open ordinary text files for light
 editing and inspect multi-gigabyte logs or raw bytes without loading them into
 memory.
+<img width="832" height="560" alt="RNotepad-gui" src="https://github.com/user-attachments/assets/54cb8303-46e1-45e5-823a-8df50069db8a" />
+
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Platform: Windows 10/11 x64](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-lightgrey)
