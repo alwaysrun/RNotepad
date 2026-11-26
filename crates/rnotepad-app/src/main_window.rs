@@ -8,19 +8,20 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::mem::size_of;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM, GlobalFree,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+    FrameRect, GetDC,
     GetMonitorInfoW, GetStockObject, GetSysColor, GetTextExtentPoint32W, IntersectClipRect,
     MonitorFromPoint, MonitorFromRect, RestoreDC, SaveDC, ScreenToClient, SelectClipRgn,
     SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, COLOR_BTNFACE,
@@ -31,7 +32,7 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT, VARIABLE_PITCH, WHITE_BRUSH,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData, COPYDATASTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
@@ -41,16 +42,16 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
 };
 use windows::Win32::UI::Controls::{
-    GetComboBoxInfo, InitCommonControlsEx, BST_CHECKED, COMBOBOXINFO, EM_SETSEL, ICC_BAR_CLASSES,
-    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES,
-    INITCOMMONCONTROLSEX, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
-    LVM_ENSUREVISIBLE, LVM_INSERTCOLUMNW, LVM_SETCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETITEMCOUNT, LVSICF_NOSCROLL,
-    LVM_GETITEMRECT,
-    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SINGLESEL, NMLISTVIEW, NMLVDISPINFOW, NMLVCUSTOMDRAW, NM_CLICK, NM_CUSTOMDRAW,
-    NM_RCLICK, NMHDR, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, WC_LISTVIEWW, CDDS_ITEMPREPAINT,
-    CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT,
+    GetComboBoxInfo, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
+    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT, COMBOBOXINFO, EM_GETSEL,
+    EM_SETSEL,
+    ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
+    LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIS_FOCUSED, LVIS_SELECTED,
+    LVITEMW, LVM_ENSUREVISIBLE, LVM_GETITEMRECT, LVM_INSERTCOLUMNW, LVM_SETCOLUMNW,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVN_GETDISPINFOW,
+    LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SINGLESEL, NMHDR, NM_CLICK, NM_CUSTOMDRAW, NM_RCLICK, NMLISTVIEW,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -60,13 +61,13 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_RESETCONTENT,
+    AllowSetForegroundWindow, AppendMenuW, ASFW_ANY, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
+    BS_PUSHBUTTON, CB_ADDSTRING, CB_RESETCONTENT,
     CB_SETDROPPEDWIDTH, CBS_AUTOHSCROLL, CBS_DROPDOWN, CheckMenuItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, EnableMenuItem, FCONTROL, FVIRTKEY, GA_ROOT,
-    GetAncestor, GetClientRect,
+    DispatchMessageW, DrawMenuBar, EnableMenuItem, EnumWindows, FCONTROL, FVIRTKEY, GA_ROOT,
+    GetAncestor, GetClassNameW, GetClientRect,
     GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowPlacement,
     GetWindowRect,
     GetWindowTextLengthW,
@@ -75,18 +76,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK,
     MB_YESNOCANCEL, MB_YESNO, MENU_ITEM_FLAGS,
-    MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    IsIconic, MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MESSAGEBOX_STYLE, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SM_CXSCREEN, SM_CYSCREEN,
-    SW_HIDE, SW_SHOW,
-    SW_SHOWMAXIMIZED, SendMessageW, SetCursor,
+    SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SW_SHOWMAXIMIZED, SendMessageTimeoutW, SendMessageW, SetCursor, SetForegroundWindow,
     SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
     TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
     WINDOWPLACEMENT,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT, WM_DESTROY,
+    WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
+    WM_COPY, WM_COPYDATA, WM_CUT, WM_DESTROY,
     WM_DROPFILES, WM_GETFONT, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETTEXT, WM_SIZE, WM_TIMER,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
+    WM_TIMER,
     WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
     WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL, WM_SETFONT, ACCEL,
@@ -134,6 +137,8 @@ const BODY_BACKGROUND: COLORREF = rgb(255, 255, 255);
 const FIND_BAR_BACKGROUND: COLORREF = rgb(246, 246, 246);
 /// Colour of the draggable divider between the text and hex panes.
 const SPLITTER_COLOR: COLORREF = rgb(206, 206, 206);
+/// Colour of the frame that groups the find-bar option check boxes.
+const FIND_OPTIONS_BORDER: COLORREF = rgb(206, 206, 206);
 /// Ratios the divider drag may not cross, so both panes stay usable.
 const MIN_SPLIT_RATIO: f32 = 0.10;
 const MAX_SPLIT_RATIO: f32 = 0.90;
@@ -229,6 +234,8 @@ const SUBCLASS_FIND_EDIT: usize = 1;
 const SUBCLASS_REPLACE_EDIT: usize = 2;
 /// Subclass identifier of the Scintilla editor, which intercepts right-clicks.
 const SUBCLASS_EDITOR: usize = 3;
+/// Control character produced by Ctrl+A inside an edit control.
+const CHAR_CTRL_A: usize = 0x01;
 
 /// Column headers and widths of the search-hit table.
 const RESULT_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Text", 400)];
@@ -265,6 +272,11 @@ const RESULT_HEADER_FONT_POINTS: i32 = 9;
 const RESULT_HEADER_INDENT: i32 = 8;
 const RESULT_HEADER_EXPANDED_GLYPH: char = '\u{25BC}';
 const RESULT_HEADER_COLLAPSED_GLYPH: char = '\u{25B6}';
+/// Background of the result row the user is currently viewing.
+const ACTIVE_RESULT_BACKGROUND: COLORREF = rgb(204, 228, 247);
+/// Item state marking the result row the user is currently viewing.
+const RESULT_ITEM_SELECTED: LIST_VIEW_ITEM_STATE_FLAGS =
+    LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
 /// Column headers and widths of the JSON problem table.
 const PROBLEM_COLUMNS: [(&str, i32); 3] = [("Line", 60), ("Column", 70), ("Message", 300)];
 /// Extended styles of the results list.
@@ -281,6 +293,19 @@ const RESULTS_PREVIEW_GUTTER: i32 = 4;
 const FLOAT_CLASS_NAME: &str = "RNotepadFloatFrame";
 /// Caption of the floating results frame.
 const FLOAT_TITLE: &str = "Results";
+/// Window class of the main frame.
+///
+/// The launch hand-off looks for windows of this class, so the name must stay
+/// identical to the one used when registering and creating the window.
+const MAIN_CLASS_NAME: &str = "RNotepadMainWindow";
+/// `dwData` tag identifying a file-open hand-off carried by `WM_COPYDATA`.
+const HANDOFF_MAGIC: usize = 0x524E_4F50;
+/// Milliseconds another instance may take to acknowledge a hand-off.
+const HANDOFF_TIMEOUT_MS: u32 = 2_000;
+/// Maximum class name length read back from an enumerated window.
+const CLASS_NAME_CAPACITY: usize = 64;
+/// Posted by the hand-off handler so reloading never blocks the sender.
+const WM_APP_HANDOFF_RELOAD: u32 = 0x8000 + 5;
 // Menu items of the results context menu, kept above zero as Win32 requires.
 /// Jumps back to the match behind a hit row.
 const ID_RESULTS_SHOW_TEXT: u32 = 3001;
@@ -507,6 +532,10 @@ struct App {
     fields_snapshot: [String; STATUS_FIELD_COUNT],
     disp_text: Vec<u16>,
     hit_cursor: usize,
+    /// Hit the user is currently viewing, as `(group, hit)`.
+    active_hit: Option<(usize, usize)>,
+    /// Row that currently carries the selection state in the results list.
+    applied_row: Option<usize>,
 }
 
 impl Default for App {
@@ -551,6 +580,8 @@ impl Default for App {
             fields_snapshot: std::array::from_fn(|_| String::new()),
             disp_text: Vec::new(),
             hit_cursor: NO_HIT,
+            active_hit: None,
+            applied_row: None,
         }
     }
 }
@@ -821,6 +852,7 @@ impl App {
         }
         show_window(list, false);
         self.results_list = Some(list);
+        self.applied_row = None;
         self.results_mode = ResultsMode::Hits;
         self.fit_results_last_column(ResultsMode::Hits);
         Some(list)
@@ -1452,16 +1484,15 @@ impl App {
         }
         let row_one = body_height + FIND_ROW_GAP;
         let row_two = row_one + FIND_ROW_HEIGHT + FIND_ROW_GAP;
-        let available = (width
+        // Both input fields share one width so the two rows line up, and the
+        // option frame occupies the same columns in both rows.  The reserved
+        // action width is the wider row (Replace, Replace All, Stop).
+        let edit_width = (width
             - FIND_BUTTON_WIDTH * 2
-            - FIND_CASE_WIDTH
-            - FIND_WRAP_WIDTH
-            - FIND_WHOLE_WORD_WIDTH
-            - FIND_EXPRESSION_WIDTH
-            - FIND_CLOSE_WIDTH
-            - FIND_ROW_GAP * 8)
+            - FIND_CANCEL_WIDTH
+            - FIND_OPTIONS_WIDTH
+            - FIND_ROW_GAP * 5)
             .max(0);
-        let edit_width = available;
         // The combo height covers its closed field plus the drop list; the
         // list height is what caps the history panel.
         move_control(bar.edit, FIND_ROW_GAP, row_one, edit_width, FIND_DROPDOWN_HEIGHT);
@@ -1478,30 +1509,26 @@ impl App {
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.all, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
-        move_control(bar.expression, x, row_one, FIND_EXPRESSION_WIDTH, FIND_ROW_HEIGHT);
-        let x = x + FIND_EXPRESSION_WIDTH + FIND_ROW_GAP;
-        move_control(bar.case, x, row_one, FIND_CASE_WIDTH, FIND_ROW_HEIGHT);
-        let x = x + FIND_CASE_WIDTH + FIND_ROW_GAP;
-        move_control(bar.whole_word, x, row_one, FIND_WHOLE_WORD_WIDTH, FIND_ROW_HEIGHT);
-        let x = x + FIND_WHOLE_WORD_WIDTH + FIND_ROW_GAP;
-        move_control(bar.wrap, x, row_one, FIND_WRAP_WIDTH, FIND_ROW_HEIGHT);
-        let x = x + FIND_WRAP_WIDTH + FIND_ROW_GAP;
         move_control(bar.close, x, row_one, FIND_CLOSE_WIDTH, FIND_ROW_HEIGHT);
-        let replace_width = (width
-            - FIND_BUTTON_WIDTH * 2
-            - FIND_CANCEL_WIDTH
-            - FIND_ROW_GAP * 5)
-            .max(0);
-        move_control(bar.replace, FIND_ROW_GAP, row_two, replace_width, FIND_DROPDOWN_HEIGHT);
+        // Case and Word share the first option row, Expr and Wrap the second;
+        // the frame drawn by `paint` marks them as one setting group.
+        let options = find_options_rect(width, body_height);
+        let column_one = options.left + FIND_OPTIONS_PADDING;
+        let column_two = column_one + FIND_CASE_WIDTH + FIND_OPTIONS_GAP;
+        move_control(bar.case, column_one, row_one, FIND_CASE_WIDTH, FIND_ROW_HEIGHT);
+        move_control(bar.whole_word, column_two, row_one, FIND_WHOLE_WORD_WIDTH, FIND_ROW_HEIGHT);
+        move_control(bar.expression, column_one, row_two, FIND_EXPRESSION_WIDTH, FIND_ROW_HEIGHT);
+        move_control(bar.wrap, column_two, row_two, FIND_WRAP_WIDTH, FIND_ROW_HEIGHT);
+        move_control(bar.replace, FIND_ROW_GAP, row_two, edit_width, FIND_DROPDOWN_HEIGHT);
         unsafe {
             let _ = SendMessageW(
                 bar.replace,
                 CB_SETDROPPEDWIDTH,
-                Some(WPARAM(replace_width.max(0) as usize)),
+                Some(WPARAM(edit_width.max(0) as usize)),
                 None,
             );
         }
-        let x = FIND_ROW_GAP + replace_width + FIND_ROW_GAP;
+        let x = FIND_ROW_GAP + edit_width + FIND_ROW_GAP;
         move_control(bar.replace_one, x, row_two, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.replace_all, x, row_two, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
@@ -1861,6 +1888,7 @@ impl App {
         self.status_message = "New document".to_owned();
         self.refresh_title();
         self.hit_cursor = NO_HIT;
+        self.clear_result_selection();
         if let Some(list) = self.results_list {
             unsafe {
                 SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -1901,6 +1929,7 @@ impl App {
                     ViewLayout::Hex
                 };
                 self.hit_cursor = NO_HIT;
+                self.clear_result_selection();
                 let (kind, charset, confidence) = self
                     .session
                     .read(|doc| (doc.kind, doc.encoding.charset, doc.confidence))
@@ -1928,6 +1957,66 @@ impl App {
                 self.show_message(MB_ICONERROR, "Open failed", &format!("{err}"));
             }
         }
+    }
+
+    /// Handles a `WM_COPYDATA` open request sent by a second launch.
+    ///
+    /// Returns `true` only when this window owns the requested file, which
+    /// tells the sender to exit instead of creating another window.  A clean
+    /// buffer schedules a reload so a newer disk revision is picked up;
+    /// unsaved edits are never discarded.
+    fn on_open_handoff(&mut self, lparam: LPARAM) -> bool {
+        let Some(requested) = handoff_path(lparam) else {
+            return false;
+        };
+        let Some(current) = self.document_path() else {
+            return false;
+        };
+        if !same_file(&current, &requested) {
+            return false;
+        }
+        self.bring_to_front();
+        if !self.is_dirty() {
+            // Deferred so the sender's SendMessageTimeout never waits for a
+            // large file to be read again.
+            if let Err(err) = unsafe {
+                PostMessageW(Some(self.hwnd), WM_APP_HANDOFF_RELOAD, WPARAM(0), LPARAM(0))
+            } {
+                tracing::warn!(error = %err, "scheduling the reload after a hand-off failed");
+            }
+        }
+        true
+    }
+
+    /// Loads the disk revision requested by a second launch.
+    ///
+    /// Runs asynchronously so the activating process can exit immediately.
+    fn reload_after_handoff(&mut self) {
+        if self.is_dirty() || !self.file_changed_on_disk() {
+            return;
+        }
+        match self.reload_document() {
+            Ok(()) => {
+                self.clear_external_change();
+                self.status_message = "Reloaded from disk".to_owned();
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "reloading after a second launch failed");
+                self.status_message = format!("Reload failed: {err}");
+            }
+        }
+        self.update_status();
+    }
+
+    /// Restores a minimized window and brings it to the foreground.
+    fn bring_to_front(&self) {
+        unsafe {
+            if IsIconic(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+        self.focus_search_or_view();
     }
 
     /// Opens the recent-file entry selected from the File menu.
@@ -2039,6 +2128,7 @@ impl App {
         self.session.close();
         self.reset_results_table();
         self.hit_cursor = NO_HIT;
+        self.clear_result_selection();
         if let Some(list) = self.results_list {
             unsafe {
                 SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -2639,9 +2729,9 @@ impl App {
             Some(ResultRow::Hit { group, hit }) => self.session.results.hit(group, hit).copied(),
             _ => None,
         };
-        let hit_index = match row {
-            Some(ResultRow::Hit { hit, .. }) => hit,
-            _ => NO_HIT,
+        let hit_position = match row {
+            Some(ResultRow::Hit { group, hit }) => Some((group, hit)),
+            _ => None,
         };
         let has_groups = !self.session.results.is_empty();
         // SAFETY: the popup menu is owned locally and every handle stays live
@@ -2680,14 +2770,20 @@ impl App {
         }
         match self.track_menu(menu) {
             ID_RESULTS_SHOW_TEXT => {
-                let Some(hit) = hit else {
+                let (Some(hit), Some((group, hit_index))) = (hit, hit_position) else {
                     return;
                 };
                 if self.session.layout == ViewLayout::Hex {
                     self.set_layout(ViewLayout::Text);
                 }
                 self.hit_cursor = hit_index.saturating_add(1);
+                self.select_result_hit(group, hit_index);
                 self.navigate_to(&hit, true);
+                // The menu action keeps the pattern field ready for the next
+                // keystroke, as before navigation stopped owning focus.
+                if self.find_bar_visible() {
+                    self.focus_search_input();
+                }
             }
             ID_RESULTS_TOGGLE_GROUP => {
                 if let Some(group) = group {
@@ -2714,6 +2810,7 @@ impl App {
                     }
                     self.session.results.remove_group(group);
                     self.hit_cursor = NO_HIT;
+                    self.clear_result_selection();
                     self.apply_search_highlights();
                     self.after_results_change();
                 }
@@ -2722,6 +2819,7 @@ impl App {
                 self.cancel_search();
                 self.session.results.clear();
                 self.hit_cursor = NO_HIT;
+                self.clear_result_selection();
                 self.clear_search_highlights();
                 self.after_results_change();
             }
@@ -2905,6 +3003,67 @@ impl App {
         state.0 == BST_CHECKED.0 as isize
     }
 
+    /// `true` while the find bar is shown, which is the search state.
+    fn find_bar_visible(&self) -> bool {
+        self.find.as_ref().is_some_and(|bar| bar.visible)
+    }
+
+    /// Moves keyboard focus into the pattern field when the find bar is shown.
+    ///
+    /// Returns `false` and leaves focus untouched while the bar is hidden, so
+    /// callers can fall back to the active view.
+    fn focus_search_input(&self) -> bool {
+        match self.find.as_ref() {
+            Some(bar) if bar.visible => {
+                // The pattern combo forwards focus to its embedded edit child.
+                let _ = unsafe { SetFocus(Some(bar.edit)) };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns focus to the search field or, without a search, to the view.
+    fn focus_search_or_view(&self) {
+        if !self.focus_search_input() {
+            self.focus_active_view();
+        }
+    }
+
+    /// Returns focus to the find bar after one of its controls was clicked.
+    ///
+    /// Buttons and check boxes take keyboard focus when clicked; without this
+    /// the next keystroke would stop editing the search pattern.  The
+    /// replacement field keeps focus because typing there is part of the same
+    /// workflow.
+    fn restore_search_focus(&self, command: u32) {
+        let from_find_bar = matches!(
+            command,
+            ID_FIND_NEXT_BUTTON
+                | ID_FIND_ALL_BUTTON
+                | ID_FIND_REPLACE_ONE
+                | ID_FIND_REPLACE_BUTTON
+                | ID_FIND_CANCEL
+                | ID_FIND_CASE
+                | ID_FIND_WRAP
+                | ID_FIND_WHOLE_WORD
+                | ID_FIND_EXPRESSION
+                | ID_EDIT_FIND_NEXT
+                | ID_EDIT_FIND_ALL
+        );
+        if !from_find_bar {
+            return;
+        }
+        let focus = unsafe { GetFocus() };
+        let replacement_focused = self
+            .find
+            .as_ref()
+            .is_some_and(|bar| focus == bar.replace || focus == bar.replace_input);
+        if !replacement_focused {
+            self.focus_search_input();
+        }
+    }
+
     fn toggle_find_bar(&mut self, show: bool) {
         let Some(bar) = self.find.as_mut() else {
             return;
@@ -2986,7 +3145,10 @@ impl App {
             let hit = control.find(&pattern, case, whole_word, false, from, wrap);
             if let Some((start, stop)) = hit {
                 control.set_selection(start, stop);
-                control.focus();
+                // In search state the next keystroke belongs to the pattern.
+                if !self.find_bar_visible() {
+                    control.focus();
+                }
             }
             hit
         } else {
@@ -3124,6 +3286,7 @@ impl App {
             .results
             .start_group(pattern.clone(), doc_id, revision);
         self.hit_cursor = NO_HIT;
+        self.active_hit = None;
         self.set_results_mode(ResultsMode::Hits);
         self.refresh_results_count();
         self.job = Some(SearchJob::spawn(shared, query));
@@ -3137,6 +3300,9 @@ impl App {
         // header of the group that just started.
         self.reveal_newest_group();
         self.update_status();
+        // Find All leaves the button with focus after a click; the pattern
+        // field must keep receiving the keystrokes that refine the search.
+        self.focus_search_input();
     }
 
     fn cancel_search(&mut self) {
@@ -3363,6 +3529,93 @@ impl App {
                 );
             }
         }
+        self.apply_result_selection();
+    }
+
+    /// Marks `hit` as the row the user is viewing.
+    fn select_result_hit(&mut self, group: usize, hit: usize) {
+        self.active_hit = Some((group, hit));
+        self.apply_result_selection();
+    }
+
+    /// Forgets the viewed hit and clears the list selection.
+    fn clear_result_selection(&mut self) {
+        self.active_hit = None;
+        self.apply_result_selection();
+    }
+
+    /// Mirrors [`App::active_hit`] into the results list.
+    ///
+    /// The owner-data list drops item state when its row count changes, so the
+    /// selection is re-applied after every rebuild as well as after a click or
+    /// a navigation command.  `LVS_SINGLESEL` makes a new selection replace
+    /// the previous one, so only the "selection went away" case needs an
+    /// explicit reset.
+    fn apply_result_selection(&mut self) {
+        let Some(list) = self.results_list else {
+            return;
+        };
+        let target = match self.results_mode {
+            ResultsMode::Hits => self
+                .active_hit
+                .and_then(|(group, hit)| self.session.results.row_of_hit(group, hit)),
+            ResultsMode::Problems => None,
+        };
+        if target.is_none() && self.applied_row.is_none() {
+            return;
+        }
+        if target.is_none() {
+            if let Some(previous) = self.applied_row {
+                let mut cleared = LVITEMW {
+                    stateMask: RESULT_ITEM_SELECTED,
+                    ..Default::default()
+                };
+                unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_SETITEMSTATE,
+                        Some(WPARAM(previous)),
+                        Some(LPARAM(&mut cleared as *mut LVITEMW as isize)),
+                    );
+                }
+            }
+        }
+        if let Some(row) = target {
+            let mut item = LVITEMW {
+                state: RESULT_ITEM_SELECTED,
+                stateMask: RESULT_ITEM_SELECTED,
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(
+                    list,
+                    LVM_SETITEMSTATE,
+                    Some(WPARAM(row)),
+                    Some(LPARAM(&mut item as *mut LVITEMW as isize)),
+                );
+                if self.applied_row != Some(row) {
+                    SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
+                }
+            }
+        }
+        if target != self.applied_row {
+            self.applied_row = target;
+            self.repaint_results();
+        }
+    }
+
+    /// `true` when `row` is the hit the user is currently viewing.
+    fn is_active_result_row(&self, row: usize) -> bool {
+        let Some((group, hit)) = self.active_hit else {
+            return false;
+        };
+        matches!(
+            self.session.results.row(row),
+            Some(ResultRow::Hit {
+                group: row_group,
+                hit: row_hit,
+            }) if row_group == group && row_hit == hit
+        )
     }
 
     /// Scrolls the header of the newest group into view.
@@ -3424,7 +3677,7 @@ impl App {
     }
 
     fn jump_to_next_hit(&mut self) {
-        let hit = {
+        let next = {
             let hits = self.session.results.active_hits();
             let len = hits.len();
             if len == 0 {
@@ -3435,10 +3688,20 @@ impl App {
             }
             let index = self.hit_cursor % len;
             self.hit_cursor = (index + 1) % len;
-            hits.get(index).copied()
+            hits.get(index).copied().map(|hit| (hit, index))
         };
-        if let Some(hit) = hit {
+        if let Some((hit, index)) = next {
+            // Keep the list selection on the hit being viewed so Next / F3
+            // always shows which row the text came from.
+            if let Some(group) = self.session.results.newest_index() {
+                self.select_result_hit(group, index);
+            }
             self.navigate_to(&hit, true);
+            // Next / F3 hands typing back to the pattern field, so the next
+            // keystroke refines the search instead of editing the match.
+            if self.find_bar_visible() {
+                self.focus_search_input();
+            }
         }
     }
 
@@ -3451,6 +3714,7 @@ impl App {
         let Some(shared) = self.session.doc.clone() else {
             return;
         };
+        let search_state = self.find_bar_visible();
         let guard = shared
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -3468,7 +3732,11 @@ impl App {
                 if let (Some(start), Some(end)) = (start, end) {
                     let stop = if select_match { end.0 } else { start.0 };
                     control.set_selection(start.0, stop);
-                    control.focus();
+                    // In search state the pattern field keeps focus so the
+                    // next keystroke refines the search instead of editing.
+                    if !search_state {
+                        control.focus();
+                    }
                 } else {
                     control.scroll_to_line(line_no);
                 }
@@ -3629,11 +3897,11 @@ impl App {
     fn focused_find_edit(&self) -> Option<HWND> {
         let focus = unsafe { GetFocus() };
         let bar = self.find.as_ref()?;
-        // The pattern combo forwards focus to its embedded edit child.
+        // Both combos forward focus to their embedded edit child.
         if focus == bar.input || focus == bar.edit {
             Some(bar.input)
-        } else if focus == bar.replace {
-            Some(bar.replace)
+        } else if focus == bar.replace_input || focus == bar.replace {
+            Some(bar.replace_input)
         } else {
             None
         }
@@ -4492,6 +4760,13 @@ impl App {
                                 bottom: (body.bottom + FIND_BAR_HEIGHT).min(client.bottom),
                             };
                             FillRect(hdc, &bar_rect, find_brush);
+                            // The option frame sits below the check boxes in the
+                            // z-order, so drawing it here keeps the controls on
+                            // top and avoids a separate container window.
+                            let options = find_options_rect(client.right, body.bottom);
+                            let border = CreateSolidBrush(FIND_OPTIONS_BORDER);
+                            FrameRect(hdc, &options, border);
+                            let _ = DeleteObject(HGDIOBJ(border.0));
                         }
                     }
                     let _ = DeleteObject(HGDIOBJ(find_brush.0));
@@ -4741,6 +5016,7 @@ impl App {
                                 self.session.results.hit(group_index, hit_index).copied()
                             {
                                 self.hit_cursor = hit_index.saturating_add(1);
+                                self.select_result_hit(group_index, hit_index);
                                 // A double-click returns focus to the text view
                                 // and selects the whole match for editing.
                                 self.navigate_to(&hit, true);
@@ -4763,9 +5039,17 @@ impl App {
             }
             if self.results_mode == ResultsMode::Hits {
                 if let Ok(index) = usize::try_from(unsafe { (*info).iItem }) {
-                    if let Some(ResultRow::Group { group }) = self.session.results.row(index) {
-                        self.session.results.toggle_group(group);
-                        self.after_results_change();
+                    match self.session.results.row(index) {
+                        Some(ResultRow::Group { group }) => {
+                            self.session.results.toggle_group(group);
+                            self.after_results_change();
+                        }
+                        // A single click marks the viewed hit without moving
+                        // the caret; the double-click opens it.
+                        Some(ResultRow::Hit { group, hit }) => {
+                            self.select_result_hit(group, hit);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -4814,8 +5098,25 @@ impl App {
                 row = param;
             }
         }
-        let Some(ResultRow::Group { group }) = self.session.results.row(row) else {
+        let Some(result_row) = self.session.results.row(row) else {
             return LRESULT(CDRF_DODEFAULT as isize);
+        };
+        let group = match result_row {
+            ResultRow::Group { group } => group,
+            ResultRow::Hit { .. } => {
+                // Hits keep the default drawing, but the viewed one gets a
+                // fixed background: the list usually does not own focus while
+                // the search field does, so the inactive selection colour
+                // alone would be hard to spot.
+                if !self.is_active_result_row(row) {
+                    return LRESULT(CDRF_DODEFAULT as isize);
+                }
+                unsafe {
+                    (*info).clrText = COLORREF(GetSysColor(COLOR_BTNTEXT));
+                    (*info).clrTextBk = ACTIVE_RESULT_BACKGROUND;
+                }
+                return LRESULT(CDRF_NEWFONT as isize);
+            }
         };
         let Some(model_group) = self.session.results.group(group) else {
             return LRESULT(CDRF_DODEFAULT as isize);
@@ -4901,11 +5202,13 @@ impl App {
                 let _ = DestroyWindow(frame);
             }
             self.results_list = None;
+            self.applied_row = None;
         }
         if let Some(list) = self.results_list.take() {
             unsafe {
                 let _ = DestroyWindow(list);
             }
+            self.applied_row = None;
         }
         if let Some(font) = self.status_font.take() {
             unsafe {
@@ -5242,6 +5545,20 @@ fn move_control(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
     }
 }
 
+/// Bounds of the frame that groups the option check boxes.
+///
+/// The frame spans both find-bar rows and keeps the same right margin as the
+/// controls; `paint` draws it so the four options read as one setting group.
+fn find_options_rect(width: i32, bar_top: i32) -> RECT {
+    let left = (width - FIND_ROW_GAP - FIND_OPTIONS_WIDTH).max(0);
+    RECT {
+        left,
+        top: bar_top + FIND_OPTIONS_INSET,
+        right: left + FIND_OPTIONS_WIDTH,
+        bottom: bar_top + FIND_BAR_HEIGHT - FIND_OPTIONS_INSET,
+    }
+}
+
 fn show_bar(bar: &FindBar, visible: bool) {
     for hwnd in [
         bar.edit,
@@ -5428,6 +5745,9 @@ unsafe extern "system" fn float_frame_proc(
 fn register_class(instance: HINSTANCE, icons: Option<&WindowIcons>) -> Result<(), String> {
     let large = icons.map(|icons| icons.large()).unwrap_or_default();
     let small = icons.map(|icons| icons.small()).unwrap_or_default();
+    // The class name is shared with the launch hand-off lookup, so it lives in
+    // one constant instead of being repeated at the call sites.
+    let class_name = to_wide(MAIN_CLASS_NAME);
     // SAFETY: the class is registered once per process with a valid wndproc.
     unsafe {
         let wc = WNDCLASSEXW {
@@ -5441,7 +5761,7 @@ fn register_class(instance: HINSTANCE, icons: Option<&WindowIcons>) -> Result<()
             hCursor: LoadCursorW(None, IDC_ARROW).map_err(|err| err.to_string())?,
             hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
             lpszMenuName: w!(""),
-            lpszClassName: w!("RNotepadMainWindow"),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
             hIconSm: small,
         };
         if RegisterClassExW(&wc) == 0 {
@@ -5705,6 +6025,70 @@ unsafe extern "system" fn find_edit_proc(
     _subclass: usize,
     refdata: usize,
 ) -> LRESULT {
+    let replacement_field = _subclass == SUBCLASS_REPLACE_EDIT;
+    // A combo box selects its whole text when the embedded edit is
+    // double-clicked; replaying that click as a single one only moves the
+    // caret, so a double-click never replaces the pattern by accident.  The
+    // replacement field keeps the real double-click so a word can still be
+    // picked out with the mouse after a single click selected everything.
+    if message == WM_LBUTTONDBLCLK {
+        let forwarded = if replacement_field {
+            WM_LBUTTONDBLCLK
+        } else {
+            WM_LBUTTONDOWN
+        };
+        // SAFETY: forwarding to the original window procedure.
+        return unsafe { DefSubclassProc(hwnd, forwarded, wparam, lparam) };
+    }
+    // Ctrl+A arrives as a control character, which a plain edit ignores.
+    if message == WM_CHAR && wparam.0 == CHAR_CTRL_A {
+        // SAFETY: `hwnd` is the live edit control being subclassed.
+        unsafe {
+            let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+        return LRESULT(0);
+    }
+    // A click that brings focus into a field selects the whole text so typing
+    // replaces it; the replacement field selects it on every click because the
+    // replace command leaves the caret there, and clicks inside the pattern
+    // field keep the normal caret placement.
+    if message == WM_LBUTTONDOWN && (replacement_field || unsafe { GetFocus() } != hwnd) {
+        // SAFETY: `hwnd` is the live edit control being subclassed.
+        unsafe {
+            let _ = SetFocus(Some(hwnd));
+            let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+        return LRESULT(0);
+    }
+    // An edit control selects its whole content when it gains focus, which
+    // flashes when a results double-click hands focus back.  Keep the caret
+    // and selection the field had instead.
+    if message == WM_SETFOCUS {
+        let mut start: u32 = 0;
+        let mut end: u32 = 0;
+        // SAFETY: both out parameters are live stack variables.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                EM_GETSEL,
+                Some(WPARAM(&mut start as *mut u32 as usize)),
+                Some(LPARAM(&mut end as *mut u32 as isize)),
+            );
+        }
+        // SAFETY: forwarding to the original window procedure.
+        let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        // Re-applying the saved range removes the selection the default
+        // handling just made, before anything is painted.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                EM_SETSEL,
+                Some(WPARAM(start as usize)),
+                Some(LPARAM(end as isize)),
+            );
+        }
+        return result;
+    }
     if message == WM_KEYDOWN {
         let key = wparam.0 as u32;
         // `refdata` carries the command Enter should run for this field.
@@ -5829,9 +6213,37 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             with_app(hwnd, App::repaint_results);
             LRESULT(0)
         }
+        WM_ACTIVATE => {
+            let state = (wparam.0 & 0xFFFF) as u32;
+            if state != WA_INACTIVE {
+                // Switching back while the find bar is open keeps typing in
+                // the search pattern.
+                with_app(hwnd, |app| {
+                    app.focus_search_input();
+                });
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_COMMAND => {
             let id = (wparam.0 as u32) & 0xFFFF;
-            with_app(hwnd, |app| app.command(id));
+            with_app(hwnd, |app| {
+                app.command(id);
+                // A clicked find-bar control takes focus; hand typing back to
+                // the pattern field.
+                app.restore_search_focus(id);
+            });
+            LRESULT(0)
+        }
+        WM_COPYDATA => {
+            let accepted = with_app_result(hwnd, |app| app.on_open_handoff(lparam));
+            if accepted.unwrap_or(false) {
+                LRESULT(1)
+            } else {
+                LRESULT(0)
+            }
+        }
+        WM_APP_HANDOFF_RELOAD => {
+            with_app(hwnd, App::reload_after_handoff);
             LRESULT(0)
         }
         WM_NOTIFY => {
@@ -5877,6 +6289,125 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+/// State of one launch-hand-off search over the top-level windows.
+struct HandoffSearch {
+    /// File requested by the new process.
+    path: PathBuf,
+    /// Window that acknowledged the request, if any.
+    accepted: Option<HWND>,
+}
+
+/// Asks an existing window that already owns `path` to activate itself.
+///
+/// Returns `true` when an instance accepted the request, in which case the
+/// caller must exit instead of creating a second window.
+fn hand_off_to_open_instance(path: &Path) -> bool {
+    let mut search = HandoffSearch {
+        path: path.to_path_buf(),
+        accepted: None,
+    };
+    // SAFETY: `search` outlives the enumeration and the callback only receives
+    // this pointer.
+    unsafe {
+        // The receiver is not the foreground process; this launched process
+        // grants it permission to bring itself to the front.
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        if let Err(err) = EnumWindows(
+            Some(handoff_window_proc),
+            LPARAM(&mut search as *mut HandoffSearch as isize),
+        ) {
+            tracing::warn!(error = %err, "enumerating open RNotepad windows failed");
+        }
+    }
+    search.accepted.is_some()
+}
+
+/// Offers the requested path to one top-level window.
+///
+/// The return value controls `EnumWindows`: `false` stops it once a window
+/// accepted the request.
+unsafe extern "system" fn handoff_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam points at the HandoffSearch owned by the enumeration
+    // caller, which keeps it alive for the duration of EnumWindows.
+    let search = unsafe { &mut *(lparam.0 as *mut HandoffSearch) };
+    if search.accepted.is_some() {
+        return BOOL(0);
+    }
+    let mut class = [0u16; CLASS_NAME_CAPACITY];
+    let length = unsafe { GetClassNameW(hwnd, &mut class) };
+    if length <= 0 {
+        return BOOL(1);
+    }
+    let class = String::from_utf16_lossy(&class[..length as usize]);
+    if class != MAIN_CLASS_NAME {
+        return BOOL(1);
+    }
+    let mut wide: Vec<u16> = search.path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let bytes = wide.len().saturating_mul(size_of::<u16>());
+    let data = COPYDATASTRUCT {
+        dwData: HANDOFF_MAGIC,
+        cbData: u32::try_from(bytes).unwrap_or(u32::MAX),
+        lpData: wide.as_ptr() as *mut std::ffi::c_void,
+    };
+    let mut answer = 0usize;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&data as *const COPYDATASTRUCT as isize),
+            SMTO_ABORTIFHUNG,
+            HANDOFF_TIMEOUT_MS,
+            Some(&mut answer),
+        )
+    };
+    if sent.0 != 0 && answer != 0 {
+        search.accepted = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+/// Reads the file path carried by a `WM_COPYDATA` open request.
+fn handoff_path(lparam: LPARAM) -> Option<PathBuf> {
+    let info = lparam.0 as *const COPYDATASTRUCT;
+    if info.is_null() {
+        return None;
+    }
+    // SAFETY: a WM_COPYDATA message always carries a valid COPYDATASTRUCT.
+    let info = unsafe { &*info };
+    if info.dwData != HANDOFF_MAGIC || info.lpData.is_null() || info.cbData == 0 {
+        return None;
+    }
+    let count = info.cbData as usize / size_of::<u16>();
+    if count == 0 {
+        return None;
+    }
+    // SAFETY: the system marshalled cbData bytes into this process for the
+    // duration of the message.
+    let wide = unsafe { std::slice::from_raw_parts(info.lpData as *const u16, count) };
+    let end = wide.iter().position(|value| *value == 0).unwrap_or(wide.len());
+    if end == 0 {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_wide(&wide[..end])))
+}
+
+/// `true` when both paths name the same file.
+///
+/// A second launch may spell the path differently (case, `..`, short names),
+/// so both sides are canonicalised before the comparison.
+fn same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Ok(left), Ok(right)) = (std::fs::canonicalize(left), std::fs::canonicalize(right)) else {
+        return false;
+    };
+    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
 }
 
 /// Reads the first path from a shell drop and releases the drop handle.
@@ -6013,6 +6544,18 @@ fn centered_window_rect() -> RECT {
 /// Returns the first fatal initialisation error, such as a failed window class
 /// registration or window creation.
 pub fn run() -> Result<(), String> {
+    // A second launch with a file argument must first ask an instance that
+    // already owns that file to come forward instead of opening a new window.
+    let initial_path = std::env::args_os().nth(1).map(PathBuf::from);
+    if let Some(path) = initial_path.as_ref() {
+        if hand_off_to_open_instance(path) {
+            tracing::info!(
+                path = %path.display(),
+                "open request handed to an existing window"
+            );
+            return Ok(());
+        }
+    }
     // SAFETY: initialising common controls multiple times is allowed.
     unsafe {
         let controls = INITCOMMONCONTROLSEX {
@@ -6056,12 +6599,13 @@ pub fn run() -> Result<(), String> {
     app.word_wrap = settings.word_wrap;
     app.settings = settings;
     let app = Box::into_raw(app);
+    let class_name = to_wide(MAIN_CLASS_NAME);
     // SAFETY: the pointer is handed to the window; WM_NCCREATE stores it and
     // WM_NCDESTROY reclaims it.
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_APPWINDOW | WS_EX_CLIENTEDGE,
-            w!("RNotepadMainWindow"),
+            PCWSTR(class_name.as_ptr()),
             w!("RNotepad"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             bounds.left,
@@ -6088,8 +6632,8 @@ pub fn run() -> Result<(), String> {
     }
     with_app(hwnd, App::initialise);
     with_app(hwnd, |app| {
-        if let Some(path) = std::env::args_os().nth(1) {
-            app.open_document(PathBuf::from(path));
+        if let Some(path) = initial_path {
+            app.open_document(path);
         } else {
             app.refresh_title();
         }

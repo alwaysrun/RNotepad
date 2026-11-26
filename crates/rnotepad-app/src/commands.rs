@@ -216,6 +216,18 @@ pub const FIND_DROPDOWN_HEIGHT: i32 =
     FIND_ROW_HEIGHT + FIND_DROPDOWN_ROWS * FIND_DROPDOWN_ROW_HEIGHT;
 /// Width of the find-bar close button.
 pub const FIND_CLOSE_WIDTH: i32 = 28;
+/// Horizontal padding between the option frame border and its check boxes.
+pub const FIND_OPTIONS_PADDING: i32 = 8;
+/// Horizontal gap between the two option columns.
+pub const FIND_OPTIONS_GAP: i32 = 8;
+/// Vertical inset of the option frame inside the find bar.
+pub const FIND_OPTIONS_INSET: i32 = 2;
+/// Width of the frame that groups the find-bar option check boxes.
+///
+/// The first column holds Case and Expr, the second Word and Wrap, so the
+/// frame is as wide as the wider entry of each column plus the padding.
+pub const FIND_OPTIONS_WIDTH: i32 =
+    FIND_OPTIONS_PADDING * 2 + FIND_OPTIONS_GAP + FIND_CASE_WIDTH + FIND_WRAP_WIDTH;
 /// Default size of the floating results frame.
 pub const FLOAT_FRAME_WIDTH: i32 = 480;
 /// Default height of the floating results frame.

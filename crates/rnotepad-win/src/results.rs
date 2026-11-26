@@ -266,6 +266,20 @@ impl ResultsModel {
         self.groups.get(group)?.hits.get(index)
     }
 
+    /// Row index of one hit, or `None` when its group is collapsed.
+    #[must_use]
+    pub fn row_of_hit(&self, group: usize, hit: usize) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(
+                row,
+                ResultRow::Hit {
+                    group: row_group,
+                    hit: row_hit,
+                } if *row_group == group && *row_hit == hit
+            )
+        })
+    }
+
     fn rebuild_rows(&mut self) {
         self.rows.clear();
         self.rows.reserve(self.hit_count() + self.groups.len());
