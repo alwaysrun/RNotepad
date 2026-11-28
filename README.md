@@ -6,7 +6,7 @@ vendored Scintilla 5.6.9 editing surface. Small files open in an editable text
 view; multi-gigabyte logs and raw bytes open read-only without loading the whole
 file into memory.
 
-![Uploading RNotepad-gui.png…]()
+<img width="832" height="560" alt="RNotepad-gui" src="https://github.com/user-attachments/assets/1f7d6d66-348f-4e63-acc6-9c40a9ad569b" />
 
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
