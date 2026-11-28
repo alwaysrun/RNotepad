@@ -10,3 +10,4 @@ pub mod eol;
 pub mod format;
 pub mod line_index;
 pub mod search;
+pub mod text_ops;

@@ -244,12 +244,20 @@ impl Scintilla {
     /// undo group keeps Ctrl+Z working; the save point and the undo buffer are
     /// deliberately left untouched so the document stays dirty.
     pub fn replace_all_with_undo(&self, text: &str) {
+        self.replace_range_with_undo(0, self.length(), text);
+    }
+
+    /// Replaces `[start, end)` in a single undoable step.
+    ///
+    /// Used for transforms scoped to the selection; the caller decides where
+    /// the caret goes afterwards.
+    pub fn replace_range_with_undo(&self, start: usize, end: usize, text: &str) {
         let read_only = self.send(SCI_GETREADONLY, 0, 0) != 0;
         if read_only {
             self.set_read_only(false);
         }
         self.send(SCI_BEGINUNDOACTION, 0, 0);
-        self.set_selection(0, self.length());
+        self.set_selection(start, end.max(start));
         self.replace_selection(text);
         self.send(SCI_ENDUNDOACTION, 0, 0);
         if read_only {
@@ -438,6 +446,30 @@ impl Scintilla {
         self.send(SCI_GETZOOM, 0, 0) as i32
     }
 
+    /// Tab width in columns as configured in the editor.
+    #[must_use]
+    pub fn tab_width(&self) -> usize {
+        self.send(SCI_GETTABWIDTH, 0, 0).max(1) as usize
+    }
+
+    /// Moves the caret back to a one-based line and character column.
+    ///
+    /// `column` counts characters, so the result is correct for multi-byte
+    /// text; Scintilla clamps it to the end of the line when the line became
+    /// shorter.
+    pub fn restore_line_column(&self, line: u32, column: u32) {
+        let line_index = line.saturating_sub(1);
+        let column_index = column.saturating_sub(1);
+        let position = self
+            .send(
+                SCI_POSITIONRELATIVE,
+                line_index as usize,
+                column_index as isize,
+            )
+            .max(0) as usize;
+        self.set_selection(position, position);
+    }
+
     /// Scrolls to the given logical line.
     pub fn scroll_to_line(&self, line: u32) {
         let position = self.send(SCI_POSITIONFROMLINE, line as usize, 0).max(0) as usize;
@@ -525,6 +557,67 @@ impl Scintilla {
             return None;
         }
         Some((query.found.cp_min as usize, query.found.cp_max.max(0) as usize))
+    }
+
+    /// Finds the last occurrence that starts before `from`.
+    ///
+    /// Scintilla's text search only scans forward, so every match up to `from`
+    /// is walked and the last one kept.  With `wrap`, a buffer with no match
+    /// before `from` falls back to the last match anywhere, which is what
+    /// Previous at the top of the document should select.
+    #[must_use]
+    pub fn find_previous(
+        &self,
+        pattern: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        regex: bool,
+        from: usize,
+        wrap: bool,
+    ) -> Option<(usize, usize)> {
+        let mut needle = c_string(pattern);
+        let mut flags = SCFIND_NONE;
+        if case_sensitive {
+            flags |= SCFIND_MATCHCASE;
+        }
+        if whole_word {
+            flags |= SCFIND_WHOLEWORD;
+        }
+        if regex {
+            flags |= SCFIND_REGEXP;
+        }
+        let length = self.length().min(INT_MAX_POS);
+        let limit = from.min(length);
+        if let Some(hit) = self.last_find_before(&mut needle, flags, limit) {
+            return Some(hit);
+        }
+        if wrap {
+            return self.last_find_before(&mut needle, flags, length);
+        }
+        None
+    }
+
+    /// Last match whose start lies below `limit`.
+    fn last_find_before(
+        &self,
+        needle: &mut [u8],
+        flags: usize,
+        limit: usize,
+    ) -> Option<(usize, usize)> {
+        let mut last = None;
+        let mut position = 0;
+        while position < limit {
+            let Some((start, end)) = self.find_in(needle, flags, position, limit) else {
+                break;
+            };
+            if start >= limit {
+                break;
+            }
+            last = Some((start, end));
+            // Zero-length regex matches would never advance on their own.
+            position = end.max(start + 1);
+        }
+        last
     }
 
     /// Replaces the current selection with `text`.

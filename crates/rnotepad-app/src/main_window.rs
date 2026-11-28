@@ -26,10 +26,11 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, MonitorFromRect, RestoreDC, SaveDC, ScreenToClient, SelectClipRgn,
     SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, COLOR_BTNFACE,
     COLOR_BTNTEXT, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HFONT,
-    HGDIOBJ,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_BOLD,
+    FW_NORMAL, HBRUSH, HDC, HFONT, HGDIOBJ,
     InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT, VARIABLE_PITCH, WHITE_BRUSH,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
+    RDW_UPDATENOW, RedrawWindow, ReleaseDC, TRANSPARENT, VARIABLE_PITCH, WHITE_BRUSH,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData, COPYDATASTRUCT,
@@ -37,6 +38,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
     OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
@@ -55,40 +57,50 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_F3, VK_RETURN,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_F3, VK_RETURN,
+    VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, AppendMenuW, ASFW_ANY, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
-    BS_PUSHBUTTON, CB_ADDSTRING, CB_RESETCONTENT,
+    AllowSetForegroundWindow, AppendMenuW, ASFW_ANY, BM_GETCHECK, BM_SETCHECK, BringWindowToTop,
+    BS_AUTOCHECKBOX,
+    BS_PUSHBUTTON, CallNextHookEx, CB_ADDSTRING, CB_RESETCONTENT,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
     CB_SETDROPPEDWIDTH, CBS_AUTOHSCROLL, CBS_DROPDOWN, CheckMenuItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, EnableMenuItem, EnumWindows, FCONTROL, FVIRTKEY, GA_ROOT,
-    GetAncestor, GetClassNameW, GetClientRect,
-    GetCursorPos, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindowPlacement,
+    DispatchMessageW, DrawMenuBar, EnableMenuItem, EnumWindows, FCONTROL, FSHIFT, FVIRTKEY,
+    GA_ROOT,
+    GetAncestor, GetClassNameW, GetClientRect, GetDlgItem,
+    GetCursorPos, GetForegroundWindow, GetMenu, GetMessageW, GetParent, GetSystemMetrics, GetWindow,
+    GetWindowPlacement, GetWindowThreadProcessId, GW_OWNER, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
     GetWindowRect,
     GetWindowTextLengthW,
     GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENS,
     IDC_SIZEWE, IDNO,
-    IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
+    IDYES, IsWindow, KillTimer, LoadCursorW, MB_DEFBUTTON3, MB_ICONERROR, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK,
     MB_YESNOCANCEL, MB_YESNO, MENU_ITEM_FLAGS,
-    IsIconic, MessageBoxW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    IsIconic, MessageBoxW, MESSAGEBOX_RESULT, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
+    MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MESSAGEBOX_STYLE, MoveWindow, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterClassW, SM_CXVSCROLL, SM_CXSCREEN, SM_CYSCREEN,
     SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWMAXIMIZED, SendMessageTimeoutW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenuEx,
-    TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_STYLE,
-    WINDOWPLACEMENT,
+    SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SendMessageTimeoutW, SendMessageW, SetCursor,
+    SetForegroundWindow,
+    SetMenu, SetParent, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    SetWindowsHookExW, ShowWindow, TrackPopupMenuEx,
+    TranslateAcceleratorW, TranslateMessage, TPM_LEFTALIGN, TPM_RETURNCMD, UnhookWindowsHookEx,
+    WINDOW_STYLE, WH_CBT, WINDOWPLACEMENT,
     WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
-    WM_COPY, WM_COPYDATA, WM_CUT, WM_DESTROY,
+    WM_COPY, WM_COPYDATA, WM_CREATE, WM_CUT, WM_DESTROY,
     WM_DROPFILES, WM_GETFONT, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
+    WM_NCDESTROY, WM_NOTIFY, WM_NULL, WM_PAINT, WM_PASTE, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT,
+    WM_SIZE,
     WM_TIMER,
     WNDCLASSEXW, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
     WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
@@ -105,6 +117,7 @@ use rnotepad_core::format::{
     Diagnostic, FormatKind, FormatOptions, FormatProvider, JsonFormatProvider, XmlConfigProvider,
 };
 use rnotepad_core::search::{CompiledQuery, MatchHit, SearchMode, SearchQuery};
+use rnotepad_core::text_ops::TextTransform;
 
 use rnotepad_win::dw::{
     MonoFont, DEFAULT_FONT_POINTS, MAX_FONT_POINTS, MIN_FONT_POINTS, rgb,
@@ -178,46 +191,110 @@ const EXTERNAL_CHANGE_HINT: &str =
     "File changed on disk; use File > Reload to load the disk copy";
 /// Extension appended when a Save As name has none of its own.
 const SAVE_DEFAULT_EXTENSION: &str = "txt";
-/// Caption of the quick usage guide opened from the Help menu.
-const USAGE_CAPTION: &str = "Quick Usage";
-/// Short reference for the features that are not obvious from the UI.
+/// Product version reported by Cargo and shown by Help > About.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Scintilla release bundled with this build, shown by Help > About.
+const SCINTILLA_VERSION: &str = "5.6.9";
+/// Caption of the quick usage window opened from the Help menu.
+const USAGE_CAPTION: &str = "RNotepad Quick Usage";
+/// Window class of the read-only usage window.
+const USAGE_CLASS_NAME: &str = "RNotepadUsageWindow";
+/// Default size requested for a new usage window.
+const USAGE_WINDOW_WIDTH: i32 = 860;
+const USAGE_WINDOW_HEIGHT: i32 = 700;
+/// Padding between the usage window frame and its text, in physical pixels.
+const USAGE_TEXT_MARGIN: i32 = 8;
+/// Control identifier of the read-only text inside the usage window.
+const USAGE_EDIT_ID: u32 = 1;
+const USAGE_FONT_FACE: &str = "Consolas";
+const USAGE_FONT_POINTS: i32 = 10;
+/// Reference shown in a read-only window by Help > Quick Usage.
+///
+/// The text is plain ASCII so it renders identically in the monospaced edit
+/// control; [`usage_text`] converts the line feeds to the CRLF pairs that a
+/// multiline edit control requires.
 const USAGE_TEXT: &str = concat!(
-    "Search and replace\n",
+    "RNotepad - Quick Usage\n",
     "\n",
-    "- Ctrl+F opens the find bar. Next / F3 continues after the\n",
-    "  caret; Find All scans the whole file into the Results panel.\n",
-    "  Double-click a row there to jump to that match.\n",
-    "- Wrap: continue from the start of the file after reaching the\n",
-    "  end. It applies to Next, not to Find All.\n",
-    "- Case: case-sensitive matching. Off by default.\n",
-    "- Word: match whole words only, so \"cat\" skips \"catalog\".\n",
+    "Files\n",
+    "  Ctrl+N / Ctrl+O  New / open a file.  Files dropped on the window open\n",
+    "                   the same way, and a second launch hands its file to the\n",
+    "                   running window.\n",
+    "  Ctrl+S / Ctrl+R  Save / reload the file from disk.\n",
+    "  Recent Files     File > Recent Files.  Pin an entry to the taskbar jump\n",
+    "                   list with Pin Current File.\n",
+    "  Large files      Files above 16 MiB open read-only; files that cannot be\n",
+    "                   decoded as text open read-only in the Hex view.\n",
+    "  Open Folder      File > Open Containing Folder shows the current file.\n",
+    "\n",
+    "Editing\n",
+    "  Enable Editing   Edit > Enable Editing toggles the Scintilla text view\n",
+    "                   between editable and read-only.\n",
+    "  Undo / Redo      Ctrl+Z / Ctrl+Y.\n",
+    "  Clipboard        Ctrl+X / Ctrl+C / Ctrl+V.  Ctrl+A selects everything.\n",
+    "\n",
+    "Finding text (Ctrl+F)\n",
+    "  Next / Prev      F3 walks forward, Shift+F3 walks back.\n",
+    "  Find All         Scans the whole document into the Results panel;\n",
+    "                   double-click a row there to jump to that match.\n",
+    "  Case / Word      Case-sensitive matching / whole words only.\n",
+    "  Wrap             Continue from the other end of the document.\n",
+    "  Histories        The pattern and replacement fields keep separate\n",
+    "                   dropdown histories.\n",
     "\n",
     "Expression search (tick Expr, then Find All)\n",
+    "  Logic            Combine terms with AND, OR, NOT and parentheses.\n",
+    "                   Adjacent terms mean AND:  error timeout\n",
+    "                   is the same as  error AND timeout.\n",
+    "                   Operators are standalone words in any case; quote a\n",
+    "                   literal operator, e.g. \"and\".\n",
+    "  Terms            re: is a regex term, hex: is a raw byte term:\n",
+    "                       ERROR AND re:\\d{3,}\n",
+    "                       hex:\"DE AD\"\n",
+    "  Scope            All terms must match the same logical line; ^ and $\n",
+    "                   anchor on that line.  Next / F3 walks existing hits.\n",
     "\n",
-    "- Combine terms with AND, OR, NOT and parentheses. Adjacent\n",
-    "  terms mean AND:  error timeout  is  error AND timeout.\n",
-    "- Operators are standalone words in any case; quote a literal\n",
-    "  operator, e.g. \"and\".\n",
-    "- re: is a regex term, hex: is a raw byte term:\n",
-    "    ERROR AND re:\\d{3,}\n",
-    "    hex:\"DE AD\"\n",
-    "- All terms must match the same logical line. ^ and $ anchor\n",
-    "  on that line. Replace is disabled while Expr is on.\n",
-    "- Next / F3 walks the existing expression hits.\n",
+    "Replacing text (Ctrl+H)\n",
+    "  Replace          Turn on Edit > Enable Editing first.  Replace swaps\n",
+    "                   the current match, or moves to the next one.\n",
+    "  Replace All      Rewrites every match in the buffer.  Replacement is\n",
+    "                   disabled while Expr is on.\n",
     "\n",
-    "Replace\n",
+    "Views\n",
+    "  Text / Hex       View > Text, Hex or Text + Hex switches panes without\n",
+    "                   reopening the document.\n",
+    "  Results          View > Text + Results docks the list under the text;\n",
+    "                   Float Results Panel detaches it.\n",
+    "  Follow Tail      Keeps the large text view at the end of a growing log.\n",
+    "  Text display     Word Wrap and Increase / Decrease / Reset Font Size.\n",
     "\n",
-    "- Turn on Edit > Enable Editing first.\n",
-    "- Replace swaps the current match, or moves to the next one.\n",
-    "- Replace All rewrites every match in the buffer.\n",
+    "Formatting and cleanup\n",
+    "  JSON / XML       Format, Minify and Validate from the Format menu.\n",
+    "                   Problems are located by line and column; a failed\n",
+    "                   operation never replaces the buffer.\n",
+    "  Tools            Removes blank lines, trims leading or trailing\n",
+    "                   whitespace and converts TABS and spaces.\n",
     "\n",
-    "Other\n",
+    "Encoding and line endings\n",
+    "  Encoding         Reinterprets the current bytes.\n",
+    "  Convert          Chooses the encoding written on save.\n",
+    "  BOM / EOL        Both have their own menus.\n",
     "\n",
-    "- View > Text + Results keeps hits beside the text.\n",
-    "- View > Follow Tail follows a growing log file.\n",
-    "- Encoding changes how the current bytes are interpreted;\n",
-    "  BOM and EOL have their own menus.",
+    "Troubleshooting\n",
+    "  Changed on disk  RNotepad reports external changes in the title bar and\n",
+    "                   status bar; use File > Reload to load the disk copy.\n",
+    "  Logging          Help > Enable Logging writes a daily log file next to\n",
+    "                   the executable.\n",
 );
+
+/// Text for the read-only usage window.
+///
+/// The constant uses line feeds for readability; a multiline edit control
+/// only breaks lines at CRLF pairs, so the display path expands them.
+fn usage_text() -> String {
+    USAGE_TEXT.replace('\n', "\r\n")
+}
+
 const STATUS_FONT_FACE: &str = "Segoe UI";
 const STATUS_FONT_POINTS: i32 = 9;
 const POINTS_PER_INCH: i32 = 72;
@@ -300,12 +377,18 @@ const FLOAT_TITLE: &str = "Results";
 const MAIN_CLASS_NAME: &str = "RNotepadMainWindow";
 /// `dwData` tag identifying a file-open hand-off carried by `WM_COPYDATA`.
 const HANDOFF_MAGIC: usize = 0x524E_4F50;
+/// `dwData` tag identifying an open request a blank window may accept.
+const HANDOFF_MAGIC_BLANK: usize = 0x524E_4F51;
 /// Milliseconds another instance may take to acknowledge a hand-off.
 const HANDOFF_TIMEOUT_MS: u32 = 2_000;
 /// Maximum class name length read back from an enumerated window.
 const CLASS_NAME_CAPACITY: usize = 64;
 /// Posted by the hand-off handler so reloading never blocks the sender.
 const WM_APP_HANDOFF_RELOAD: u32 = 0x8000 + 5;
+/// Posted when a blank window accepted the file handed over by a second launch.
+const WM_APP_OPEN_PENDING: u32 = 0x8000 + 6;
+/// Posted when the usage window is destroyed so the owner forgets its handle.
+const WM_APP_USAGE_CLOSED: u32 = 0x8000 + 7;
 // Menu items of the results context menu, kept above zero as Win32 requires.
 /// Jumps back to the match behind a hit row.
 const ID_RESULTS_SHOW_TEXT: u32 = 3001;
@@ -349,7 +432,17 @@ const EOL_MENU_ITEMS: [(u32, EolKind, &str); 3] = [
     (ID_EOL_LF, EolKind::Lf, "LF"),
     (ID_EOL_CR, EolKind::Cr, "CR"),
 ];
-const ACCELERATORS: [ACCEL; 8] = [
+/// Command ids of the Text Tools menu, one per [`TextTransform`].
+fn text_tool_command(transform: TextTransform) -> u32 {
+    match transform {
+        TextTransform::RemoveBlankLines => ID_TEXT_TOOLS_REMOVE_BLANK_LINES,
+        TextTransform::TrimLeadingWhitespace => ID_TEXT_TOOLS_TRIM_LEADING,
+        TextTransform::TrimTrailingWhitespace => ID_TEXT_TOOLS_TRIM_TRAILING,
+        TextTransform::TabsToSpaces => ID_TEXT_TOOLS_TABS_TO_SPACES,
+        TextTransform::SpacesToTabs => ID_TEXT_TOOLS_SPACES_TO_TABS,
+    }
+}
+const ACCELERATORS: [ACCEL; 9] = [
     control_accel(b'O', ID_FILE_OPEN),
     control_accel(b'S', ID_FILE_SAVE),
     control_accel(b'R', ID_FILE_RELOAD),
@@ -363,6 +456,11 @@ const ACCELERATORS: [ACCEL; 8] = [
         fVirt: ACCEL_VIRT_FLAGS(FVIRTKEY.0),
         key: VK_F3.0,
         cmd: ID_EDIT_FIND_NEXT as u16,
+    },
+    ACCEL {
+        fVirt: ACCEL_VIRT_FLAGS(FVIRTKEY.0 | FSHIFT.0),
+        key: VK_F3.0,
+        cmd: ID_EDIT_FIND_PREV as u16,
     },
 ];
 
@@ -436,6 +534,8 @@ struct FindBar {
     /// Edit child of `replace`, which receives keystrokes and focus.
     replace_input: HWND,
     next: HWND,
+    /// Moves to the match before the caret.
+    prev: HWND,
     all: HWND,
     replace_one: HWND,
     replace_all: HWND,
@@ -476,6 +576,8 @@ struct App {
     results_list: Option<HWND>,
     /// Set while the results list is reparented into a floating frame.
     float_frame: Option<HWND>,
+    /// Read-only usage window opened from the Help menu, if any.
+    usage_window: Option<HWND>,
     results_mode: ResultsMode,
     /// Diagnostics from the last failed JSON format or validation.
     problems: Vec<Diagnostic>,
@@ -536,6 +638,8 @@ struct App {
     active_hit: Option<(usize, usize)>,
     /// Row that currently carries the selection state in the results list.
     applied_row: Option<usize>,
+    /// File handed over by a second launch while this window was blank.
+    pending_open: Option<PathBuf>,
 }
 
 impl Default for App {
@@ -549,6 +653,7 @@ impl Default for App {
             hex: None,
             results_list: None,
             float_frame: None,
+            usage_window: None,
             results_mode: ResultsMode::Hits,
             problems: Vec::new(),
             status: None,
@@ -582,6 +687,7 @@ impl Default for App {
             hit_cursor: NO_HIT,
             active_hit: None,
             applied_row: None,
+            pending_open: None,
         }
     }
 }
@@ -589,6 +695,87 @@ impl Default for App {
 thread_local! {
     static IN_APP: Cell<bool> = const { Cell::new(false) };
     static REPAINT_POSTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `HCBT_ACTIVATE` notification code delivered to a `WH_CBT` hook.
+const HCBT_ACTIVATE: i32 = 5;
+/// Window class of the dialog created by [`MessageBoxW`].
+const MESSAGE_BOX_CLASS: &str = "#32770";
+
+/// Keeps a message box visible when Windows refuses to activate it.
+///
+/// A prompt belonging to a process that does not own the foreground input (a
+/// window closed from the taskbar, or one just restored from minimized) is
+/// created without `WS_VISIBLE`, so the question never appears while the owner
+/// stays disabled.  Re-showing the dialog and raising it above other windows
+/// makes the prompt reachable even though it cannot take the foreground.
+unsafe extern "system" fn prompt_visibility_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code == HCBT_ACTIVATE {
+        let dialog = HWND(wparam.0 as _);
+        let mut class = [0u16; 16];
+        let len = unsafe { GetClassNameW(dialog, &mut class) } as usize;
+        let is_message_box =
+            len > 0 && MESSAGE_BOX_CLASS.encode_utf16().eq(class[..len].iter().copied());
+        if is_message_box {
+            let _ = unsafe { ShowWindow(dialog, SW_SHOWNORMAL) };
+            let _ = unsafe {
+                SetWindowPos(
+                    dialog,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                )
+            };
+            unsafe { centre_dialog_on_owner(dialog) };
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Centres a dialog on its owner window, clamped to the owner's work area.
+///
+/// # Safety
+/// `dialog` must be a valid top-level window handle.
+unsafe fn centre_dialog_on_owner(dialog: HWND) {
+    let Ok(owner) = (unsafe { GetWindow(dialog, GW_OWNER) }) else {
+        return;
+    };
+    if owner.0.is_null() {
+        return;
+    }
+    let mut owner_rect = RECT::default();
+    let mut dialog_rect = RECT::default();
+    // SAFETY: both handles are valid and the rectangles are valid out params.
+    if unsafe { GetWindowRect(owner, &mut owner_rect) }.is_err()
+        || unsafe { GetWindowRect(dialog, &mut dialog_rect) }.is_err()
+    {
+        return;
+    }
+    let width = dialog_rect.right - dialog_rect.left;
+    let height = dialog_rect.bottom - dialog_rect.top;
+    let mut x = owner_rect.left + ((owner_rect.right - owner_rect.left) - width) / 2;
+    let mut y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - height) / 2;
+    let monitor = unsafe { MonitorFromRect(&owner_rect, MONITOR_DEFAULTTONULL) };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // A window saved on a monitor that went away still needs a reachable prompt.
+    if !monitor.0.is_null() && unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        let work = info.rcWork;
+        x = x.clamp(work.left, (work.right - width).max(work.left));
+        y = y.clamp(work.top, (work.bottom - height).max(work.top));
+    }
+    let _ = unsafe {
+        SetWindowPos(dialog, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    };
 }
 
 /// Runs one message with exclusive access to [`App`].
@@ -687,6 +874,7 @@ impl App {
             self.status_message = "Creating the replacement field failed".to_owned();
             return;
         };
+        let prev = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_PREV_BUTTON);
         let next = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_NEXT_BUTTON);
         let all = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_ALL_BUTTON);
         let replace_one =
@@ -702,6 +890,7 @@ impl App {
         let close = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CLOSE);
         let cancel = create_child(self.hwnd, w!("BUTTON"), PUSH_BUTTON_STYLE, ID_FIND_CANCEL);
         let (
+            Ok(prev),
             Ok(next),
             Ok(all),
             Ok(replace_one),
@@ -713,6 +902,7 @@ impl App {
             Ok(close),
             Ok(cancel),
         ) = (
+            prev,
             next,
             all,
             replace_one,
@@ -730,6 +920,7 @@ impl App {
         };
         set_text(edit, "");
         set_text(replace, "");
+        set_text(prev, "Prev");
         set_text(next, "Next");
         set_text(all, "Find All");
         set_text(replace_one, "Replace");
@@ -770,6 +961,7 @@ impl App {
             replace,
             replace_input,
             next,
+            prev,
             all,
             replace_one,
             replace_all,
@@ -1486,12 +1678,12 @@ impl App {
         let row_two = row_one + FIND_ROW_HEIGHT + FIND_ROW_GAP;
         // Both input fields share one width so the two rows line up, and the
         // option frame occupies the same columns in both rows.  The reserved
-        // action width is the wider row (Replace, Replace All, Stop).
+        // action width is the wider row (Prev, Next, Find All, X).
         let edit_width = (width
-            - FIND_BUTTON_WIDTH * 2
-            - FIND_CANCEL_WIDTH
+            - FIND_BUTTON_WIDTH * 3
+            - FIND_CLOSE_WIDTH
             - FIND_OPTIONS_WIDTH
-            - FIND_ROW_GAP * 5)
+            - FIND_ROW_GAP * 6)
             .max(0);
         // The combo height covers its closed field plus the drop list; the
         // list height is what caps the history panel.
@@ -1505,6 +1697,8 @@ impl App {
             );
         }
         let x = FIND_ROW_GAP + edit_width + FIND_ROW_GAP;
+        move_control(bar.prev, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
+        let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.next, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
         let x = x + FIND_BUTTON_WIDTH + FIND_ROW_GAP;
         move_control(bar.all, x, row_one, FIND_BUTTON_WIDTH, FIND_ROW_HEIGHT);
@@ -1961,14 +2155,30 @@ impl App {
 
     /// Handles a `WM_COPYDATA` open request sent by a second launch.
     ///
-    /// Returns `true` only when this window owns the requested file, which
-    /// tells the sender to exit instead of creating another window.  A clean
-    /// buffer schedules a reload so a newer disk revision is picked up;
-    /// unsaved edits are never discarded.
+    /// Returns `true` when this window took the request, which tells the sender
+    /// to exit instead of creating another window.  A request that names the
+    /// open file activates and reloads this window; a blank request is accepted
+    /// only by an untouched untitled buffer, which then loads the file.
     fn on_open_handoff(&mut self, lparam: LPARAM) -> bool {
-        let Some(requested) = handoff_path(lparam) else {
+        let Some((requested, accepts_blank)) = handoff_request(lparam) else {
             return false;
         };
+        if accepts_blank {
+            if !self.is_blank_for_handoff() {
+                return false;
+            }
+            self.bring_to_front();
+            self.pending_open = Some(requested);
+            // Deferred for the same reason as the reload: the sender must not
+            // wait for a large file to be read inside SendMessageTimeout.
+            if let Err(err) = unsafe {
+                PostMessageW(Some(self.hwnd), WM_APP_OPEN_PENDING, WPARAM(0), LPARAM(0))
+            } {
+                tracing::warn!(error = %err, "scheduling the handed-over file failed");
+                self.pending_open = None;
+            }
+            return true;
+        }
         let Some(current) = self.document_path() else {
             return false;
         };
@@ -1986,6 +2196,31 @@ impl App {
             }
         }
         true
+    }
+
+    /// `true` when this window is an untouched untitled buffer.
+    ///
+    /// Only such a window may take over a file opened from outside the app;
+    /// any path, unsaved edit or typed content belongs to the user.
+    fn is_blank_for_handoff(&self) -> bool {
+        if self.document_path().is_some() || self.is_dirty() {
+            return false;
+        }
+        match self.text.as_ref() {
+            Some(TextHandle::Scintilla(control)) => {
+                control.length() == 0 || control.get_text().trim().is_empty()
+            }
+            // A window without a Scintilla buffer holds nothing to preserve.
+            _ => true,
+        }
+    }
+
+    /// Loads the file a second launch handed to this blank window.
+    fn open_pending_document(&mut self) {
+        let Some(path) = self.pending_open.take() else {
+            return;
+        };
+        self.open_document(path);
     }
 
     /// Loads the disk revision requested by a second launch.
@@ -2017,6 +2252,81 @@ impl App {
             let _ = SetForegroundWindow(self.hwnd);
         }
         self.focus_search_or_view();
+    }
+
+    /// Brings the window forward before a modal dialog is shown.
+    ///
+    /// Commands such as Close from the taskbar menu run while the window may be
+    /// minimized or inactive.  Windows denies `SetForegroundWindow` to a process
+    /// that does not own the foreground input; attaching to the foreground
+    /// thread's input queue lifts that restriction for the call, and the
+    /// attachment is released so normal input routing resumes.  The panes are
+    /// laid out explicitly because the `WM_SIZE` sent by the restore is dropped
+    /// by the re-entrancy guard while the app is borrowed for the prompt.
+    fn activate_for_dialog(&mut self) {
+        if unsafe { IsIconic(self.hwnd) }.as_bool() {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            }
+            self.layout();
+            // Repaint the restored frame and its panes right away.  The frame's
+            // own WM_PAINT is dropped by the re-entrancy guard, but the child
+            // views paint through their own window procedures.
+            unsafe {
+                let _ = RedrawWindow(
+                    Some(self.hwnd),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME | RDW_ERASE | RDW_UPDATENOW,
+                );
+            }
+        }
+        // SAFETY: foreground queries only inspect window state.
+        unsafe {
+            let foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            let current_thread = GetCurrentThreadId();
+            let attached = foreground_thread != 0
+                && foreground_thread != current_thread
+                && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+            let _ = BringWindowToTop(self.hwnd);
+            let _ = SetForegroundWindow(self.hwnd);
+            if attached {
+                let _ = AttachThreadInput(current_thread, foreground_thread, false);
+            }
+        }
+    }
+
+    /// Shows a modal message box that stays reachable in every window state.
+    ///
+    /// The `WH_CBT` hook is installed only for the duration of the call, so it
+    /// cannot affect any other dialog of the process.
+    fn show_prompt(
+        &self,
+        message: &str,
+        caption: &str,
+        style: MESSAGEBOX_STYLE,
+    ) -> MESSAGEBOX_RESULT {
+        // SAFETY: the hook lives on this thread and is removed before returning.
+        unsafe {
+            let hook = SetWindowsHookExW(WH_CBT, Some(prompt_visibility_hook), None, GetCurrentThreadId())
+                .ok();
+            let answer = MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(to_wide(message).as_ptr()),
+                PCWSTR(to_wide(caption).as_ptr()),
+                style,
+            );
+            if let Some(hook) = hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            answer
+        }
+    }
+
+    /// Shows the file chooser after activating this window.
+    fn choose_file(&mut self, save: bool, initial: Option<&Path>) -> Option<PathBuf> {
+        self.activate_for_dialog();
+        pick_file(self.hwnd, save, initial)
     }
 
     /// Opens the recent-file entry selected from the File menu.
@@ -2174,7 +2484,7 @@ impl App {
         let previous_path = current.clone();
         let path = match target.or(current) {
             Some(path) => path,
-            None => match pick_file(self.hwnd, true, None) {
+            None => match self.choose_file(true, None) {
                 Some(path) => path,
                 None => return SaveOutcome::Cancelled,
             },
@@ -2248,7 +2558,7 @@ impl App {
 
     fn save_as(&mut self) {
         let initial = self.session.read(|doc| doc.path.clone()).flatten();
-        if let Some(path) = pick_file(self.hwnd, true, initial.as_deref()) {
+        if let Some(path) = self.choose_file(true, initial.as_deref()) {
             let _ = self.save(Some(path));
         }
     }
@@ -2390,6 +2700,49 @@ impl App {
         self.update_status();
     }
 
+    /// Applies one Text Tools transform to the selection or the whole buffer.
+    ///
+    /// A non-empty selection is transformed in place and stays selected; with
+    /// no selection the whole buffer is rewritten and the caret returns to its
+    /// line and column.  Both paths run inside one undo group, so a
+    /// line-oriented command behaves like a single edit.
+    fn apply_text_transform(&mut self, transform: TextTransform) {
+        let label = transform.label();
+        if !self.writable_text() {
+            self.write_blocked(label);
+            return;
+        }
+        let Some(TextHandle::Scintilla(control)) = self.text.as_ref() else {
+            self.status_message = format!("{label}: {MSG_WRITE_BLOCKED}");
+            self.update_status();
+            return;
+        };
+        let (start, end) = control.selection();
+        let whole_document = start == end;
+        let input = if whole_document {
+            control.get_text()
+        } else {
+            control.text_range(start, end)
+        };
+        let output = transform.apply(&input, control.tab_width());
+        if output == input {
+            self.status_message = format!("{label}: no changes");
+            self.update_status();
+            return;
+        }
+        if whole_document {
+            let caret = control.line_column(control.current_position());
+            control.replace_all_with_undo(&output);
+            control.restore_line_column(caret.0, caret.1);
+        } else {
+            control.replace_range_with_undo(start, end, &output);
+            control.set_selection(start, start + output.len());
+        }
+        self.mark_buffer_dirty();
+        self.status_message = format!("{label}: applied");
+        self.update_status();
+    }
+
     fn set_bom(&mut self, policy: BomPolicy) {
         if !self.writable_text() {
             self.write_blocked("BOM");
@@ -2504,9 +2857,17 @@ impl App {
             return 0;
         }
         let flags = (TPM_RETURNCMD | TPM_LEFTALIGN).0;
+        // A popup menu must belong to the foreground window, otherwise it can
+        // open behind another window or stay up when the user clicks away.
+        unsafe {
+            let _ = SetForegroundWindow(self.hwnd);
+        }
         let chosen = unsafe { TrackPopupMenuEx(menu, flags, point.x, point.y, self.hwnd, None) };
         unsafe {
             let _ = DestroyMenu(menu);
+            // Standard workaround: the posted null message lets the menu finish
+            // dismissing and returns activation to this window.
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         }
         chosen.0 as u32
     }
@@ -3040,6 +3401,7 @@ impl App {
         let from_find_bar = matches!(
             command,
             ID_FIND_NEXT_BUTTON
+                | ID_FIND_PREV_BUTTON
                 | ID_FIND_ALL_BUTTON
                 | ID_FIND_REPLACE_ONE
                 | ID_FIND_REPLACE_BUTTON
@@ -3049,6 +3411,7 @@ impl App {
                 | ID_FIND_WHOLE_WORD
                 | ID_FIND_EXPRESSION
                 | ID_EDIT_FIND_NEXT
+                | ID_EDIT_FIND_PREV
                 | ID_EDIT_FIND_ALL
         );
         if !from_find_bar {
@@ -3113,6 +3476,18 @@ impl App {
     }
 
     fn find_next(&mut self) {
+        self.find_step(true);
+    }
+
+    fn find_previous(&mut self) {
+        self.find_step(false);
+    }
+
+    /// Walks one match forward or backward.
+    ///
+    /// Both directions share the pattern checks, the expression handling and
+    /// the status reporting; only the starting edge and the search call differ.
+    fn find_step(&mut self, forward: bool) {
         let Some(pattern) = self.find_pattern() else {
             self.toggle_find_bar(true);
             self.status_message = "Enter a search pattern".to_owned();
@@ -3129,7 +3504,11 @@ impl App {
                 .newest()
                 .is_some_and(|group| group.query() == pattern.as_str() && group.is_complete());
             if current && self.session.results.hit_count() > 0 {
-                self.jump_to_next_hit();
+                if forward {
+                    self.jump_to_next_hit();
+                } else {
+                    self.jump_to_previous_hit();
+                }
             } else {
                 self.start_find_all();
             }
@@ -3140,9 +3519,13 @@ impl App {
         let wrap = self.find_wrap_enabled();
         self.remember_search(&pattern);
         let found = if let Some(TextHandle::Scintilla(control)) = &self.text {
-            let (_, end) = control.selection();
-            let from = if end == 0 { 0 } else { end };
-            let hit = control.find(&pattern, case, whole_word, false, from, wrap);
+            let (start, end) = control.selection();
+            let from = if forward { end } else { start };
+            let hit = if forward {
+                control.find(&pattern, case, whole_word, false, from, wrap)
+            } else {
+                control.find_previous(&pattern, case, whole_word, false, from, wrap)
+            };
             if let Some((start, stop)) = hit {
                 control.set_selection(start, stop);
                 // In search state the next keystroke belongs to the pattern.
@@ -3165,7 +3548,11 @@ impl App {
                 if self.text.is_some() {
                     self.status_message = format!("No match for \"{pattern}\"");
                 } else if self.session.results.hit_count() > 0 {
-                    self.jump_to_next_hit();
+                    if forward {
+                        self.jump_to_next_hit();
+                    } else {
+                        self.jump_to_previous_hit();
+                    }
                     return;
                 } else {
                     self.start_find_all();
@@ -3677,7 +4064,20 @@ impl App {
     }
 
     fn jump_to_next_hit(&mut self) {
-        let next = {
+        self.jump_to_hit(true);
+    }
+
+    fn jump_to_previous_hit(&mut self) {
+        self.jump_to_hit(false);
+    }
+
+    /// Moves to the next or previous collected hit.
+    ///
+    /// `hit_cursor` points one past the hit being viewed, so stepping back two
+    /// reaches the previous one; without a viewed hit, Previous starts at the
+    /// last one.
+    fn jump_to_hit(&mut self, forward: bool) {
+        let target = {
             let hits = self.session.results.active_hits();
             let len = hits.len();
             if len == 0 {
@@ -3686,11 +4086,22 @@ impl App {
                 }
                 return;
             }
-            let index = self.hit_cursor % len;
+            let index = if forward {
+                self.hit_cursor % len
+            } else {
+                match self.active_hit {
+                    Some((group, hit))
+                        if Some(group) == self.session.results.newest_index() =>
+                    {
+                        (hit + len - 1) % len
+                    }
+                    _ => len - 1,
+                }
+            };
             self.hit_cursor = (index + 1) % len;
             hits.get(index).copied().map(|hit| (hit, index))
         };
-        if let Some((hit, index)) = next {
+        if let Some((hit, index)) = target {
             // Keep the list selection on the hit being viewed so Next / F3
             // always shows which row the text came from.
             if let Some(group) = self.session.results.newest_index() {
@@ -4346,14 +4757,8 @@ impl App {
         }
         let name = self.document_name();
         let message = format!("Save changes to {name}?");
-        let answer = unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                PCWSTR(to_wide(&message).as_ptr()),
-                PCWSTR(to_wide("RNotepad").as_ptr()),
-                MB_YESNOCANCEL | MB_ICONWARNING,
-            )
-        };
+        self.activate_for_dialog();
+        let answer = self.show_prompt(&message, "RNotepad", MB_YESNOCANCEL | MB_ICONWARNING);
         match answer {
             IDYES => matches!(self.save(None), SaveOutcome::Saved),
             IDNO => true,
@@ -4408,14 +4813,12 @@ impl App {
              No: exit and discard the unsaved edits (the disk copy is kept)\n\
              Cancel: stay open (use File > Reload to load the disk copy)"
         );
-        let answer = unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                PCWSTR(to_wide(&message).as_ptr()),
-                PCWSTR(to_wide(EXIT_CAPTION).as_ptr()),
-                MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON3,
-            )
-        };
+        self.activate_for_dialog();
+        let answer = self.show_prompt(
+            &message,
+            EXIT_CAPTION,
+            MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON3,
+        );
         match answer {
             // The prompt names the overwrite explicitly, so the save may pass
             // the external-change guard it would otherwise trip again.
@@ -4426,21 +4829,14 @@ impl App {
     }
 
     /// Asks whether the editor contents may replace a newer disk copy.
-    fn confirm_external_overwrite(&self) -> bool {
+    fn confirm_external_overwrite(&mut self) -> bool {
         let name = self.document_name();
         let message = format!(
             "{name} has changed on disk since it was opened.\n\n\
              Overwrite the disk file with the editor contents?"
         );
-        let answer = unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                PCWSTR(to_wide(&message).as_ptr()),
-                PCWSTR(to_wide(EXTERNAL_CHANGE_CAPTION).as_ptr()),
-                MB_YESNO | MB_ICONWARNING,
-            )
-        };
-        answer == IDYES
+        self.activate_for_dialog();
+        self.show_prompt(&message, EXTERNAL_CHANGE_CAPTION, MB_YESNO | MB_ICONWARNING) == IDYES
     }
 
     fn caret_state(&self) -> (Option<(u32, u32)>, Option<u64>, Option<u64>) {
@@ -4604,6 +5000,9 @@ impl App {
         }
         for (id, _) in CONVERT_MENU_ITEMS {
             set(id, writable);
+        }
+        for transform in TextTransform::ALL {
+            set(text_tool_command(transform), writable);
         }
 
         let follow_flags = MF_BYCOMMAND
@@ -4780,7 +5179,7 @@ impl App {
         match id {
             ID_FILE_NEW => self.new_document(),
             ID_FILE_OPEN => {
-                if let Some(path) = pick_file(self.hwnd, false, None) {
+                if let Some(path) = self.choose_file(false, None) {
                     self.open_document(path);
                 }
             }
@@ -4803,6 +5202,7 @@ impl App {
             ID_EDIT_FIND => self.open_find(),
             ID_EDIT_REPLACE => self.open_replace(),
             ID_EDIT_FIND_NEXT => self.find_next(),
+            ID_EDIT_FIND_PREV => self.find_previous(),
             ID_EDIT_FIND_ALL => self.start_find_all(),
             ID_EDIT_SELECT_ALL => self.edit_command(rnotepad_win::sci_consts::SCI_SELECTALL),
             ID_EDIT_DELETE => self.edit_command(rnotepad_win::sci_consts::SCI_CLEAR),
@@ -4835,18 +5235,19 @@ impl App {
             ID_FORMAT_XML => self.apply_format(&XmlConfigProvider, false),
             ID_FORMAT_XML_MINIFY => self.apply_format(&XmlConfigProvider, true),
             ID_FORMAT_XML_DIAGNOSTIC => self.validate_with(&XmlConfigProvider),
-            ID_HELP_USAGE => {
-                self.show_message(MB_ICONINFORMATION, USAGE_CAPTION, USAGE_TEXT);
-            }
+            ID_HELP_USAGE => self.show_usage(),
             ID_HELP_ABOUT => {
-                self.show_message(
-                    MB_ICONINFORMATION,
-                    "RNotepad",
-                    "RNotepad — a fast, low-memory text and log viewer.\n\
-                     Text view uses Scintilla; large files are memory mapped.",
+                let text = format!(
+                    "RNotepad {APP_VERSION}\n\n\
+                     A fast, low-memory text and log viewer.\n\
+                     Text view uses Scintilla {SCINTILLA_VERSION}; large files are memory mapped.\n\n\
+                     Licensed under GPL-3.0-only.\n\
+                     Scintilla is distributed under the HPND."
                 );
+                self.show_message(MB_ICONINFORMATION, "About RNotepad", &text);
             }
             ID_FIND_NEXT_BUTTON => self.find_next(),
+            ID_FIND_PREV_BUTTON => self.find_previous(),
             ID_FIND_ALL_BUTTON => self.start_find_all(),
             ID_FIND_REPLACE_ONE => self.replace_one(),
             ID_FIND_REPLACE_BUTTON => self.replace_all(),
@@ -4856,6 +5257,8 @@ impl App {
             other => {
                 if (ID_FILE_RECENT_FIRST..=ID_FILE_RECENT_LAST).contains(&other) {
                     self.open_recent(other);
+                } else if let Some(transform) = text_transform_for(other) {
+                    self.apply_text_transform(transform);
                 } else if let Some(charset) = charset_for(other) {
                     self.reinterpret(charset);
                 } else if let Some(charset) = convert_charset_for(other) {
@@ -5170,14 +5573,69 @@ impl App {
         LRESULT(CDRF_SKIPDEFAULT as isize)
     }
 
-    fn show_message(&self, icon: MESSAGEBOX_STYLE, caption: &str, text: &str) {
-        unsafe {
-            MessageBoxW(
+    fn show_message(&mut self, icon: MESSAGEBOX_STYLE, caption: &str, text: &str) {
+        self.activate_for_dialog();
+        let _ = self.show_prompt(text, caption, MB_OK | icon);
+    }
+
+    /// Opens the usage guide in a read-only window.
+    ///
+    /// Reusing one window keeps the open document untouched and avoids
+    /// stacking duplicate help frames; a second request raises the existing
+    /// window instead of creating another one.
+    fn show_usage(&mut self) {
+        if let Some(window) = self.usage_window {
+            if unsafe { IsWindow(Some(window)) }.as_bool() {
+                unsafe {
+                    if IsIconic(window).as_bool() {
+                        let _ = ShowWindow(window, SW_RESTORE);
+                    }
+                    let _ = SetForegroundWindow(window);
+                }
+                return;
+            }
+            // The window disappeared without delivering its closed message.
+            self.usage_window = None;
+        }
+        let instance = match unsafe { GetModuleHandleW(None) } {
+            Ok(module) => module,
+            Err(err) => {
+                tracing::warn!(error = %err, "GetModuleHandleW failed for the usage window");
+                self.status_message = format!("Quick Usage failed: {err}");
+                self.update_status();
+                return;
+            }
+        };
+        let class = to_wide(USAGE_CLASS_NAME);
+        let title = to_wide(USAGE_CAPTION);
+        let style = WINDOW_STYLE(
+            WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_VISIBLE.0,
+        );
+        // SAFETY: the class is registered once at startup; the owner keeps the
+        // frame above the main window and off the taskbar.
+        let created = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                PCWSTR(class.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                style,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                USAGE_WINDOW_WIDTH,
+                USAGE_WINDOW_HEIGHT,
                 Some(self.hwnd),
-                PCWSTR(to_wide(text).as_ptr()),
-                PCWSTR(to_wide(caption).as_ptr()),
-                MB_OK | icon,
-            );
+                None,
+                Some(HINSTANCE(instance.0)),
+                None,
+            )
+        };
+        match created {
+            Ok(window) => self.usage_window = Some(window),
+            Err(err) => {
+                tracing::warn!(error = %err, "usage window creation failed");
+                self.status_message = format!("Quick Usage failed: {err}");
+                self.update_status();
+            }
         }
     }
 
@@ -5195,6 +5653,13 @@ impl App {
         self.text = None;
         self.text_data = None;
         self.hex = None;
+        if let Some(window) = self.usage_window.take() {
+            // Owned windows die with their owner, but destroying the help
+            // frame here keeps the teardown order explicit.
+            unsafe {
+                let _ = DestroyWindow(window);
+            }
+        }
         if let Some(frame) = self.float_frame.take() {
             // The list is a child of the frame, so destroying the frame
             // releases both windows.
@@ -5742,6 +6207,153 @@ unsafe extern "system" fn float_frame_proc(
     }
 }
 
+/// Registers the read-only window used by Help > Quick Usage.
+fn register_usage_class(instance: HINSTANCE) -> Result<(), String> {
+    let class = to_wide(USAGE_CLASS_NAME);
+    // SAFETY: the class is registered once per process with a valid wndproc.
+    unsafe {
+        let wc = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(usage_window_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: Default::default(),
+            hCursor: LoadCursorW(None, IDC_ARROW).map_err(|err| err.to_string())?,
+            hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
+            lpszMenuName: w!(""),
+            lpszClassName: PCWSTR(class.as_ptr()),
+        };
+        if RegisterClassW(&wc) == 0 {
+            return Err("RegisterClassW(usage window) failed".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Creates the monospaced font used by the usage text.
+fn usage_font(dpi: u32) -> Option<HFONT> {
+    let height = -((USAGE_FONT_POINTS * dpi as i32) / POINTS_PER_INCH).max(1);
+    let face = to_wide(USAGE_FONT_FACE);
+    // SAFETY: CreateFontW only reads the face string, which outlives the call.
+    let font = unsafe {
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            (FIXED_PITCH.0 as u32) | (FF_MODERN.0 as u32),
+            PCWSTR(face.as_ptr()),
+        )
+    };
+    if font.is_invalid() {
+        tracing::warn!("CreateFontW returned an invalid HFONT for the usage window");
+        return None;
+    }
+    Some(font)
+}
+
+/// Fits the read-only text to the usage window's client area.
+fn layout_usage_text(window: HWND) {
+    let Ok(edit) = (unsafe { GetDlgItem(Some(window), USAGE_EDIT_ID as i32) }) else {
+        return;
+    };
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(window, &mut client) }.is_err() {
+        return;
+    }
+    let width = client.right - USAGE_TEXT_MARGIN * 2;
+    let height = client.bottom - USAGE_TEXT_MARGIN * 2;
+    move_control(edit, USAGE_TEXT_MARGIN, USAGE_TEXT_MARGIN, width, height);
+}
+
+/// Window procedure of the read-only usage window.
+///
+/// The text is an ordinary multiline edit control, so scrolling, wrapping,
+/// selection and Ctrl+C work without custom painting.
+unsafe extern "system" fn usage_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_CREATE => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            let style = WINDOW_STYLE(
+                WS_CHILD.0
+                    | WS_VISIBLE.0
+                    | WS_VSCROLL.0
+                    | ES_MULTILINE as u32
+                    | ES_READONLY as u32
+                    | ES_AUTOVSCROLL as u32,
+            );
+            let edit = match create_child(hwnd, w!("EDIT"), style, USAGE_EDIT_ID) {
+                Ok(edit) => edit,
+                Err(err) => {
+                    tracing::error!(error = %err, "usage text creation failed");
+                    return LRESULT(-1);
+                }
+            };
+            if let Some(font) = usage_font(dpi) {
+                // The window owns the font and deletes it in WM_NCDESTROY.
+                unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, font.0 as isize) };
+                unsafe {
+                    let _ = SendMessageW(
+                        edit,
+                        WM_SETFONT,
+                        Some(WPARAM(font.0 as usize)),
+                        Some(LPARAM(1)),
+                    );
+                }
+            }
+            let text = usage_text();
+            unsafe {
+                let _ = SetWindowTextW(edit, PCWSTR(to_wide(&text).as_ptr()));
+            }
+            layout_usage_text(hwnd);
+            unsafe {
+                let _ = SetFocus(Some(edit));
+            }
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            layout_usage_text(hwnd);
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            let font = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+            if font != 0 {
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    let _ = DeleteObject(HGDIOBJ(font as *mut std::ffi::c_void));
+                }
+            }
+            if let Ok(owner) = unsafe { GetParent(hwnd) } {
+                unsafe {
+                    let _ = PostMessageW(Some(owner), WM_APP_USAGE_CLOSED, WPARAM(0), LPARAM(0));
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
 fn register_class(instance: HINSTANCE, icons: Option<&WindowIcons>) -> Result<(), String> {
     let large = icons.map(|icons| icons.large()).unwrap_or_default();
     let small = icons.map(|icons| icons.small()).unwrap_or_default();
@@ -5821,6 +6433,7 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         append(edit, MF_STRING, ID_EDIT_FIND, "Find\tCtrl+F");
         append(edit, MF_STRING, ID_EDIT_REPLACE, "Replace\tCtrl+H");
         append(edit, MF_STRING, ID_EDIT_FIND_NEXT, "Find Next\tF3");
+        append(edit, MF_STRING, ID_EDIT_FIND_PREV, "Find Previous\tShift+F3");
         append(edit, MF_STRING, ID_EDIT_FIND_ALL, "Find All");
         append(edit, MF_STRING, ID_FIND_CANCEL, "Cancel Search");
         menu_popup(menu, edit, "Edit");
@@ -5840,6 +6453,11 @@ fn build_menu(recent: &RecentFiles) -> Result<HMENU, String> {
         append(view, MF_STRING, ID_VIEW_FOLLOW_TAIL, "Follow Tail");
         append(view, MF_STRING, ID_VIEW_RESULTS_FLOAT, "Float Results Panel");
         menu_popup(menu, view, "View");
+
+        let Some(tools) = build_text_tools_menu() else {
+            return Err("Tools menu unavailable".to_owned());
+        };
+        menu_popup(menu, tools, "Tools");
 
         let encoding = CreatePopupMenu().map_err(|err| err.to_string())?;
         for (id, label) in CHARSET_MENU_ITEMS {
@@ -5891,6 +6509,24 @@ fn create_menu_or_report() -> Option<HMENU> {
             None
         }
     }
+}
+
+/// Creates the top-level Tools menu holding every text transform.
+fn build_text_tools_menu() -> Option<HMENU> {
+    let menu = create_menu_or_report()?;
+    for transform in TextTransform::ALL {
+        unsafe {
+            append(menu, MF_STRING, text_tool_command(transform), transform.label());
+        }
+    }
+    Some(menu)
+}
+
+/// Text Tools entry for a command id, if the id belongs to that menu.
+fn text_transform_for(command: u32) -> Option<TextTransform> {
+    TextTransform::ALL
+        .into_iter()
+        .find(|transform| text_tool_command(*transform) == command)
 }
 
 unsafe fn append(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str) {
@@ -6093,7 +6729,14 @@ unsafe extern "system" fn find_edit_proc(
         let key = wparam.0 as u32;
         // `refdata` carries the command Enter should run for this field.
         let command = if key == VK_RETURN.0 as u32 {
-            Some(refdata)
+            // Shift+Enter walks backwards from the pattern field; the
+            // replacement field keeps its own Enter command.
+            let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
+            if shift && refdata == ID_FIND_NEXT_BUTTON as usize {
+                Some(ID_EDIT_FIND_PREV as usize)
+            } else {
+                Some(refdata)
+            }
         } else if key == VK_ESCAPE.0 as u32 {
             Some(ID_FIND_CLOSE as usize)
         } else {
@@ -6246,6 +6889,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
             with_app(hwnd, App::reload_after_handoff);
             LRESULT(0)
         }
+        WM_APP_OPEN_PENDING => {
+            with_app(hwnd, App::open_pending_document);
+            LRESULT(0)
+        }
+        WM_APP_USAGE_CLOSED => {
+            with_app(hwnd, |app| app.usage_window = None);
+            LRESULT(0)
+        }
         WM_NOTIFY => {
             if IN_APP.with(Cell::get) {
                 request_results_repaint(hwnd, lparam);
@@ -6291,29 +6942,61 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lpar
     }
 }
 
+/// Kind of open request offered to an existing window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HandoffMode {
+    /// Only a window that already owns the file accepts.
+    ExistingFile,
+    /// Only an untouched untitled window accepts and then loads the file.
+    BlankWindow,
+}
+
+impl HandoffMode {
+    /// `dwData` tag that tells the receiver which request this is.
+    fn magic(self) -> usize {
+        match self {
+            Self::ExistingFile => HANDOFF_MAGIC,
+            Self::BlankWindow => HANDOFF_MAGIC_BLANK,
+        }
+    }
+}
+
 /// State of one launch-hand-off search over the top-level windows.
 struct HandoffSearch {
     /// File requested by the new process.
     path: PathBuf,
+    /// Request kind the enumerated windows are asked to accept.
+    mode: HandoffMode,
     /// Window that acknowledged the request, if any.
     accepted: Option<HWND>,
 }
 
-/// Asks an existing window that already owns `path` to activate itself.
+/// Asks an existing window to take over the file opened by a second launch.
 ///
-/// Returns `true` when an instance accepted the request, in which case the
-/// caller must exit instead of creating a second window.
+/// A window that already owns the file is preferred, so no duplicate view
+/// appears; otherwise a blank window is reused instead of opening another one.
+/// Returns `true` when an instance accepted, in which case the caller must exit.
 fn hand_off_to_open_instance(path: &Path) -> bool {
+    // The receiver is not the foreground process; this launched process grants
+    // it permission to bring itself to the front.
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+    [HandoffMode::ExistingFile, HandoffMode::BlankWindow]
+        .into_iter()
+        .any(|mode| offer_handoff(path, mode))
+}
+
+/// Runs one enumeration pass for `mode`.
+fn offer_handoff(path: &Path, mode: HandoffMode) -> bool {
     let mut search = HandoffSearch {
         path: path.to_path_buf(),
+        mode,
         accepted: None,
     };
     // SAFETY: `search` outlives the enumeration and the callback only receives
     // this pointer.
     unsafe {
-        // The receiver is not the foreground process; this launched process
-        // grants it permission to bring itself to the front.
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
         if let Err(err) = EnumWindows(
             Some(handoff_window_proc),
             LPARAM(&mut search as *mut HandoffSearch as isize),
@@ -6348,7 +7031,7 @@ unsafe extern "system" fn handoff_window_proc(hwnd: HWND, lparam: LPARAM) -> BOO
     wide.push(0);
     let bytes = wide.len().saturating_mul(size_of::<u16>());
     let data = COPYDATASTRUCT {
-        dwData: HANDOFF_MAGIC,
+        dwData: search.mode.magic(),
         cbData: u32::try_from(bytes).unwrap_or(u32::MAX),
         lpData: wide.as_ptr() as *mut std::ffi::c_void,
     };
@@ -6371,15 +7054,23 @@ unsafe extern "system" fn handoff_window_proc(hwnd: HWND, lparam: LPARAM) -> BOO
     BOOL(1)
 }
 
-/// Reads the file path carried by a `WM_COPYDATA` open request.
-fn handoff_path(lparam: LPARAM) -> Option<PathBuf> {
+/// Reads the open request carried by a `WM_COPYDATA` message.
+///
+/// Returns the requested path and whether a blank window may take it.  Any
+/// other tag is rejected, so unrelated data streams cannot trigger an open.
+fn handoff_request(lparam: LPARAM) -> Option<(PathBuf, bool)> {
     let info = lparam.0 as *const COPYDATASTRUCT;
     if info.is_null() {
         return None;
     }
     // SAFETY: a WM_COPYDATA message always carries a valid COPYDATASTRUCT.
     let info = unsafe { &*info };
-    if info.dwData != HANDOFF_MAGIC || info.lpData.is_null() || info.cbData == 0 {
+    let accepts_blank = match info.dwData {
+        HANDOFF_MAGIC => false,
+        HANDOFF_MAGIC_BLANK => true,
+        _ => return None,
+    };
+    if info.lpData.is_null() || info.cbData == 0 {
         return None;
     }
     let count = info.cbData as usize / size_of::<u16>();
@@ -6393,7 +7084,7 @@ fn handoff_path(lparam: LPARAM) -> Option<PathBuf> {
     if end == 0 {
         return None;
     }
-    Some(PathBuf::from(OsString::from_wide(&wide[..end])))
+    Some((PathBuf::from(OsString::from_wide(&wide[..end])), accepts_blank))
 }
 
 /// `true` when both paths name the same file.
@@ -6579,6 +7270,7 @@ pub fn run() -> Result<(), String> {
     };
     register_class(HINSTANCE(instance.0), icons.as_ref())?;
     register_float_class(HINSTANCE(instance.0))?;
+    register_usage_class(HINSTANCE(instance.0))?;
     // The taskbar identity must exist before the window is created, and COM
     // must be initialised before any shell interface is created.
     if let Err(err) = jumplist::initialise() {

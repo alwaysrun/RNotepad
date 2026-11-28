@@ -46,6 +46,19 @@ pub const ID_EDIT_SELECT_ALL: u32 = 1111;
 pub const ID_EDIT_DELETE: u32 = 1112;
 /// Open the editor context menu, posted by the editor subclass.
 pub const ID_EDIT_CONTEXT_MENU: u32 = 1113;
+/// Find the previous match (Shift+F3).
+pub const ID_EDIT_FIND_PREV: u32 = 1114;
+
+/// Remove lines that contain only whitespace.
+pub const ID_TEXT_TOOLS_REMOVE_BLANK_LINES: u32 = 1120;
+/// Remove leading spaces and tabs from every line.
+pub const ID_TEXT_TOOLS_TRIM_LEADING: u32 = 1121;
+/// Remove trailing spaces and tabs from every line.
+pub const ID_TEXT_TOOLS_TRIM_TRAILING: u32 = 1122;
+/// Replace tabs with spaces up to the next tab stop.
+pub const ID_TEXT_TOOLS_TABS_TO_SPACES: u32 = 1123;
+/// Replace leading spaces with tabs.
+pub const ID_TEXT_TOOLS_SPACES_TO_TABS: u32 = 1124;
 
 /// Text view.
 pub const ID_VIEW_TEXT: u32 = 1201;
@@ -173,6 +186,8 @@ pub const ID_FIND_WRAP: u32 = 2010;
 pub const ID_FIND_EXPRESSION: u32 = 2011;
 /// Whole-word checkbox.
 pub const ID_FIND_WHOLE_WORD: u32 = 2012;
+/// Find-previous button.
+pub const ID_FIND_PREV_BUTTON: u32 = 2013;
 
 /// Height of the status strip.
 pub const STATUS_HEIGHT: i32 = 24;
