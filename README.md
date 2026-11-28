@@ -1,12 +1,12 @@
 # RNotepad
 
-A lightweight Windows text / log / configuration workbench written in Rust.
-RNotepad pairs a pure-Rust data engine with a thin Win32 shell and a vendored
-Scintilla 5.6.9 editing surface, so it can open ordinary text files for light
-editing and inspect multi-gigabyte logs or raw bytes without loading them into
-memory.
-<img width="832" height="560" alt="RNotepad-gui" src="https://github.com/user-attachments/assets/54cb8303-46e1-45e5-823a-8df50069db8a" />
+A lightweight, portable Windows text, log and configuration workbench written in
+Rust. RNotepad pairs a pure-Rust data engine with a thin Win32 shell and a
+vendored Scintilla 5.6.9 editing surface. Small files open in an editable text
+view; multi-gigabyte logs and raw bytes open read-only without loading the whole
+file into memory.
 
+<img width="832" height="560" alt="RNotepad window" src="https://github.com/user-attachments/assets/54cb8303-46e1-45e5-823a-8df50069db8a" />
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Platform: Windows 10/11 x64](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-lightgrey)
@@ -14,51 +14,65 @@ memory.
 
 ## Features
 
-- **Text and Hex views of the same document** — switch without reopening or
-  re-decoding; `Text + Hex` shows both panes side by side, and a selection in
-  either pane reveals the matching text or bytes. The hex view highlights BOM,
-  EOL and multi-byte sequences.
-- **Large-file viewing** — files above the 16 MiB editing threshold open
-  read-only through an mmap-backed, virtualized line view with *Follow Tail*
-  for logs that are still growing. Files that cannot be decoded as text open
-  read-only in the Hex view.
-- **Encoding and line-ending awareness** — detects UTF-8, UTF-16 LE/BE,
-  GB18030, GBK, Big5, Shift-JIS, Windows-1252 and Latin-1, tracks BOM state and
-  mixed CRLF/LF/CR statistics. *Encoding* reinterprets the bytes, *Convert*
-  chooses the encoding written on save, and BOM and EOL have their own menus.
-- **Find and replace** — literal search with case, whole-word and wrap options;
-  *Find All* appends a collapsible result group to the results panel; *Find
-  Next* (F3) walks the matches; replace one or replace all. Background searches
-  are cancellable and report progress, and search and replacement text keep
-  separate persistent histories.
-- **Expression search** — tick *Expr* to combine terms with `AND`, `OR`, `NOT`
-  and parentheses; adjacent terms mean `AND`. `re:` terms are regular
-  expressions and `hex:` terms match raw bytes, all scoped to one logical line.
-- **JSON and XML config tooling** — format, minify and validate JSON and XML
+- **One document, two views** — Text and Hex are two views of the same bytes;
+  switch without reopening or re-decoding. *Text + Hex* shows both panes side by
+  side with a draggable divider, and the caret or selection in one pane is
+  mirrored in the other. The hex view highlights BOM, EOL bytes, search hits and
+  multi-byte sequences.
+- **Large files and binaries** — files above the 16 MiB editing threshold open
+  read-only through a memory-mapped, virtualized text view with *Follow Tail*
+  for logs that are still growing. A file that cannot be decoded as text opens
+  read-only in the Hex view instead.
+- **Encoding and line endings** — detects UTF-8, UTF-16 LE/BE, GB18030, GBK,
+  Big5, Shift-JIS and Windows-1252 by BOM, UTF-8 validity, a UTF-16 heuristic,
+  `chardetng` and a final fallback; Latin-1 is available for manual
+  reinterpretation. Tracks BOM state and mixed CRLF/LF/CR counts. Choosing an
+  entry in the *Encoding* menu reinterprets the current bytes and sets the
+  charset written on save; the *EOL* menu converts the buffer immediately and
+  keeps that choice on save; BOM has its own Keep / Add / Strip entries.
+- **Find, expression search and replace** — literal search with Case, Word and
+  Wrap options. *Find All* streams matches into collapsible groups in the
+  results panel; double-click a row to jump to that match. Background searches
+  are cancellable and report progress in the status bar. Tick *Expr* to combine
+  terms with `AND`, `OR`, `NOT` and parentheses (adjacent terms mean `AND`);
+  `re:` terms are regular expressions, `hex:` terms match raw bytes, and every
+  term is scoped to one logical line. Replace swaps the current match and
+  Replace All rewrites every match. Pattern and replacement text keep separate
+  persistent histories.
+- **Text tools** — Remove Blank Lines, Trim Leading Whitespace, Trim Trailing
+  Whitespace, Tabs to Spaces and Spaces to Tabs. A non-empty selection is
+  transformed in place; otherwise the whole buffer is rewritten, both as a
+  single undo step.
+- **JSON and XML config tooling** — Format, Minify and Validate JSON and XML
   configuration files (`.json`, `.xml`, `.config`, `.csproj`, `.props`,
-  `.targets`, `.nuspec`, `.plist`, `.resx`, `.xaml`). Problems are located by
+  `.targets`, `.nuspec`, `.plist`, `.resx`, `.xaml`). Problems are reported with
   line and column in the problem panel; a failed operation never replaces the
-  buffer, and a successful format is a single undo step.
-- **Desktop integration** — recent files with taskbar jump-list pinning,
-  drag-and-drop, single-instance hand-off (a second launch with a file opens
-  it in the running window), *Open Containing Folder*, external-change
-  detection with reload, persisted window placement, font size and word-wrap
-  state, and optional file logging toggled from the Help menu.
-- **Editing aids** — *Enable Editing* toggles a document read-only, *Word Wrap*
-  and font-size commands adjust the text view, and the status bar reports view
-  mode, encoding confidence, EOL statistics, size, caret or selection,
-  document flags, byte offset and background progress.
+  buffer, and a successful format is one undo step. The same actions appear in
+  the editor context menu for a detected document.
+- **Desktop integration** — recent files (up to 10) with taskbar jump-list
+  pinning, drag-and-drop, second-launch hand-off (reuses the window that already
+  owns the file or an untouched window), Open Containing Folder,
+  external-change detection with title and status markers plus reload, persisted
+  window placement, font size and word-wrap state, and optional file logging
+  toggled from the Help menu.
+- **Editing aids** — editable files open in an editable text view; *Enable
+  Editing* toggles it read-only, while large and binary documents stay read-only.
+  Enter keeps the previous line's indentation while editing. The status bar
+  reports view mode, encoding (plus BOM and confidence when it is low), EOL
+  statistics, size, caret or selection, document flags, byte offset and
+  background progress.
 - **Portable bundle** — the runnable application is an executable plus
   `Scintilla.dll` and its license file; no installer and no registry writes.
-  `recent.json`, `history.json`, `settings.json` and optional logs are stored
-  beside the executable, so the whole folder can be moved as one unit.
+  Preferences, history and optional logs are stored beside the executable, so
+  the whole folder can be moved as one unit. Saves are written to a temporary
+  file and swapped in, so a failed save leaves the original intact.
 
 ## Requirements
 
 - Windows 10 or Windows 11, x64
 - Rust 1.85 or newer with the MSVC toolchain
 - PowerShell 7+
-- `third_party/Scintilla.dll` (tracked in the repository) — regenerate it with
+- `third_party/Scintilla.dll` (tracked in the repository). Regenerate it with
   `scripts/build-scintilla.ps1` only when upgrading Scintilla; that script needs
   the Visual Studio C++ build tools, while `cargo build` itself stays pure Rust.
 
@@ -70,6 +84,9 @@ pwsh -File scripts/build-crates.ps1
 
 # Debug build
 pwsh -File scripts/build-crates.ps1 -Profile Debug
+
+# Optional: clean the selected profile first
+pwsh -File scripts/build-crates.ps1 -Clean
 ```
 
 The bundle contains:
@@ -81,8 +98,52 @@ output\License.txt   # Scintilla / Lexilla / SciTE notice
 ```
 
 For development, `cargo run -p rnotepad-app` works directly: the Scintilla DLL
-is located under `third_party\` relative to the executable. Run the test suite
-with `cargo test --workspace`.
+is searched for next to the executable and under `third_party\` in its ancestor
+directories. Run the test suite with `cargo test --workspace`.
+
+The build also embeds the application icon and version resource with the Windows
+SDK `rc.exe` when one is installed; without it the build warns and still
+succeeds.
+
+## Using RNotepad
+
+The window opens with an untitled editable buffer. Files can be opened from
+*File > Open*, the recent-files list, a command-line path or by dropping them on
+the window.
+
+| Menu | Entries |
+| --- | --- |
+| File | New, Open, Recent Files, Pin Current File to Taskbar List, Save, Save As, Reload, Open Containing Folder, Close, Exit |
+| Edit | Undo, Redo, Cut, Copy, Paste, Enable Editing, Find, Replace, Find Next, Find Previous, Find All, Cancel Search |
+| View | Text, Hex, Text + Hex, Text + Results, Word Wrap, Increase/Decrease/Reset Font Size, Follow Tail, Float Results Panel |
+| Tools | Remove Blank Lines, Trim Leading Whitespace, Trim Trailing Whitespace, Tabs to Spaces, Spaces to Tabs |
+| Encoding | UTF-8, UTF-16 LE/BE, GBK, GB18030, Big5, Shift-JIS, Windows-1252, Latin-1, Keep BOM, Add BOM, Strip BOM |
+| EOL | CRLF, LF, CR |
+| Format | Format, Minify and Validate JSON Config; Format, Minify and Validate XML Config |
+| Help | Enable Logging, Quick Usage, About RNotepad |
+
+Worth knowing:
+
+- The hex view is always read-only; *Enable Editing* only affects a Scintilla
+  text view.
+- Replace and Replace All require an editable text view and are disabled while
+  *Expr* is ticked.
+- Ctrl+F opens the find bar; Enter searches from the pattern field, Shift+Enter
+  walks backwards, and Escape closes the bar.
+- *Help > Quick Usage* opens a read-only reference with the same command map
+  inside the application.
+
+## Data files
+
+These files live beside the executable; deleting them simply resets the related
+state.
+
+| File | Contents |
+| --- | --- |
+| `settings.json` | Window placement, editor font size and word-wrap state |
+| `recent.json` | Recent files and taskbar-pinned files |
+| `history.json` | Separate find and replacement histories |
+| `logs\rnotepad.<date>.log` | Daily rolling log, created only after *Help > Enable Logging* |
 
 ## Keyboard shortcuts
 
@@ -92,10 +153,11 @@ with `cargo test --workspace`.
 | `Ctrl+S` | Save |
 | `Ctrl+R` | Reload from disk |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | Cut / copy / paste |
-| `Ctrl+A` | Select all (editor focus) |
+| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | Cut / copy / paste in the editor or focused field |
+| `Ctrl+A` | Select all in the focused field |
 | `Ctrl+F` / `Ctrl+H` | Find / replace |
 | `F3` | Find next |
+| `Shift+F3` | Find previous |
 
 ## Project layout
 
@@ -104,13 +166,13 @@ crates/rnotepad-core   Pure-Rust data engine: bytes, encoding, EOL, line index,
                        coordinates, search, formatting, document model
 crates/rnotepad-win    Win32 shell and custom views: Scintilla host, large-file
                        view, hex view, results list, status bar, save/notify
-crates/rnotepad-app    Application: message loop, main window, commands,
+crates/rnotepad-app    Application: message loop, main window, menus, commands,
                        session state and background tasks
-crates/assets          Application icon
-vendor/scintilla-5.6.9 Vendored Scintilla source, pinned and not tracked upstream
+crates/assets          Application icons embedded in the executable
+vendor/scintilla-5.6.9 Vendored Scintilla 5.6.9 sources used to rebuild the DLL
 third_party            Prebuilt Scintilla.dll and its license
-scripts                Build helpers (bundle assembly, Scintilla, constants)
-docs                   Implementation specification and XML format plan
+scripts                Build helpers (bundle assembly, Scintilla build, constants)
+docs                   Implementation specification and XML config format plan
 ```
 
 The dependency direction is one-way: `core` is free of OS and UI types, `win`
